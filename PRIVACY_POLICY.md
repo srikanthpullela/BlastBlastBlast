@@ -1,11 +1,11 @@
 # Privacy Policy
 
-**Cannon Blast**
+**BlastBlastBlast**
 **Last Updated:** June 25, 2026
 
 ## Overview
 
-Cannon Blast ("the Extension") is a Chrome browser extension that turns any webpage into a playful artillery game. When activated, it places a cannon and a gun at the bottom of the current page, lets you blast page content apart with physics-based explosions, and spawns soldiers that try to "steal" page elements for you to shoot. This privacy policy explains what data the Extension accesses, how it is used, and how it is protected.
+BlastBlastBlast ("the Extension") is a Chrome browser extension that turns any webpage into a playful artillery game. When activated, it places a cannon and a gun at the bottom of the current page, lets you blast page content apart with physics-based explosions, and spawns soldiers that try to "steal" page elements for you to shoot. This privacy policy explains what data the Extension accesses, how it is used, and how it is protected.
 
 ## Data Collection
 
