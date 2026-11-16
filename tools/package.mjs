@@ -16,6 +16,8 @@ const RUNTIME_FILES = [
   "manifest.json",
   "popup.html",
   "popup.js",
+  "launcher.js",
+  "background.js",
   "content.js",
   "icons/icon16.png",
   "icons/icon48.png",
@@ -26,7 +28,10 @@ const manifest = JSON.parse(readFileSync(path.join(ROOT, "manifest.json"), "utf8
 if (manifest.key || manifest.update_url) throw new Error("manifest.json must not contain store-injected 'key' / 'update_url'.");
 
 // Every file the manifest points at must be in the package.
-const referenced = new Set([manifest.action && manifest.action.default_popup]);
+const referenced = new Set([
+  manifest.action && manifest.action.default_popup,
+  manifest.background && manifest.background.service_worker,
+]);
 for (const group of [manifest.icons, manifest.action && manifest.action.default_icon]) {
   for (const f of Object.values(group || {})) referenced.add(f);
 }

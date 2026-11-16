@@ -1,6 +1,7 @@
 /* ============================================================================
  * BlastBlastBlast — content.js
- * Injected on demand into the top frame of the active tab (see popup.js).
+ * Injected on demand into the top frame of the active tab from the popup or
+ * the keyboard shortcut (see launcher.js).
  *
  *  - Overlay: fixed full-viewport canvas, SVG tank, arsenal (Cannon, Gun,
  *    Rockets, Flamethrower, Laser, Cluster bomb; keys 1–6) and Danger toggle,
@@ -12,7 +13,9 @@
  *    and particles are drawn on the overlay canvas.
  *  - Every frame does its layout reads first, then DOM writes, then canvas
  *    work, so the game never forces extra synchronous layouts.
- *  - Esc / Remove restores the page completely.
+ *  - Sounds are synthesized with Web Audio (no files); M or 🔊 mutes.
+ *  - Esc / Remove restores the page completely, then shows a short blast
+ *    report that closes by itself (or on Esc / any click).
  * ========================================================================== */
 (function () {
   "use strict";
@@ -24,6 +27,7 @@
   if (!(document.documentElement instanceof HTMLElement)) return;   // SVG / XML documents
   if (window.__cannonBlastActive) return;
   window.__cannonBlastActive = true;
+  if (typeof window.__cbCloseReport === "function") window.__cbCloseReport(true);
 
   var VERSION = "";
   try { VERSION = chrome.runtime.getManifest().version; } catch (e) {}
@@ -159,9 +163,305 @@
   var CAMO = ["#4a5d39","#556b2f","#5b6e3a","#46532f"];
   var PLAY_TOP_FRAC     = 0.72;  // soldiers only operate in the top 72% (cannon owns the bottom)
   var clock             = 0;     // animation clock (seconds)
-  var score             = 0;     // soldiers blasted this session
+  var score             = 0;     // points this session
   var stolen            = 0;     // loot carried off
   var best              = 0;     // all-time high (chrome.storage)
+  var bestBefore        = 0;     // stored best when this game started
+
+  // How the game was launched (set by launcher.js just before injecting).
+  var launchInfo = window.__cbLaunch || {};
+  try { delete window.__cbLaunch; } catch (e) {}
+
+  // Numbers for the end-of-game blast report.
+  var stats = { firstShotAt: 0, shots: 0, hits: 0, soldiers: 0, tanks: 0, bombers: 0,
+                letters: 0, pieces: 0, bestCombo: 0, used: {}, unlocked: [] };
+  // Each cannonball, bullet, rocket or cluster bomb counts as one shot; it hits
+  // if it takes down (or damages) an enemy. Flamethrower and laser don't count.
+  function newShot() { stats.shots++; return { hit: false }; }
+  function markHit(shot) { if (shot && !shot.hit) { shot.hit = true; stats.hits++; } }
+
+  /* ── SOUND ───────────────────────────────────────────────────────────────────
+     Every sound is synthesized with Web Audio: no audio files, no network. The
+     audio context is created when the game starts, before it is on screen:
+     the first one in a browser session can block for ~150 ms while Chrome
+     starts its audio service, which would freeze the first shot. It starts
+     playing on the first click or key press (browsers require a user
+     gesture), which doesn't block. One-shot sounds are rate-limited per kind and capped
+     (MAX_VOICES) so rapid fire and Danger mode stay light; the flamethrower,
+     laser and bomber engines are single looping voices. M or 🔊 mutes, and the
+     choice is remembered on this device (cbMuted). */
+  var sfx = (function () {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    var ac = null, out = null, noise = null;
+    var muted = false, voices = 0, lastAt = {}, loops = {}, resumeAt = -1e9;
+    var VOLUME = 0.6, MAX_VOICES = 14, HARD_CAP = 20;
+    // Minimum seconds between two sounds of the same kind.
+    var GAP = { gun: 0.04, boom: 0.06, blast: 0.045, hit: 0.03, tink: 0.06, shatter: 0.1, rocket: 0.08,
+                whistle: 0.12, zap: 0.15, escape: 0.3, alert: 0.4, siren: 1, chime: 0.1, ui: 0.03 };
+    // These still play when MAX_VOICES are busy (up to HARD_CAP).
+    var IMPORTANT = { blast: 1, boom: 1, chime: 1, alert: 1, siren: 1, ui: 1 };
+    var NOTES = [523.25, 659.25, 783.99, 1046.5, 1318.5, 1568, 2093];
+
+    // Builds the context and the master chain. Without a click on the page yet, it starts suspended.
+    function create() {
+      if (ac) return true;
+      if (!AC) return false;
+      try { ac = new AC({ latencyHint: "interactive" }); } catch (e) { AC = null; return false; }
+      try {
+        var comp = ac.createDynamicsCompressor();
+        comp.threshold.value = -16; comp.knee.value = 12; comp.ratio.value = 5;
+        comp.attack.value = 0.003; comp.release.value = 0.2;
+        out = ac.createGain();
+        out.gain.value = VOLUME;
+        out.connect(comp);
+        comp.connect(ac.destination);
+        noise = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);   // 1 s of white noise, looped with random offsets
+        var d = noise.getChannelData(0);
+        for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      } catch (e) {
+        var bad = ac;
+        ac = null; AC = null;
+        bad.close()["catch"](function () {});
+        return false;
+      }
+      return true;
+    }
+    // On a click or key press: let the sound play.
+    function start() {
+      if (muted || !create()) return;
+      if (ac.state === "suspended") {
+        resumeAt = performance.now();
+        ac.resume()["catch"](function () {});
+      }
+    }
+    // Sounds scheduled while a resume we just asked for is starting up play as soon as it has.
+    function live() {
+      if (muted || !ac) return false;
+      return ac.state === "running" || (ac.state === "suspended" && performance.now() - resumeAt < 300);
+    }
+    function pan(x) { return x == null ? 0 : Math.max(-0.75, Math.min(0.75, (x / viewW) * 1.5 - 0.75)); }
+
+    // A voice: its sources → one gain → stereo pan → master. Freed when its last source ends.
+    function voice(x) {
+      var g = ac.createGain(), v = { g: g, nodes: [g], pending: 0 };
+      if (ac.createStereoPanner && x != null) {
+        var p = ac.createStereoPanner();
+        p.pan.value = pan(x);
+        g.connect(p); p.connect(out); v.nodes.push(p);
+      } else {
+        g.connect(out);
+      }
+      voices++;
+      return v;
+    }
+    function run(v, src, t0, t1, offset) {
+      v.nodes.push(src);
+      v.pending++;
+      src.onended = function () {
+        if (--v.pending > 0) return;
+        voices--;
+        for (var i = 0; i < v.nodes.length; i++) { try { v.nodes[i].disconnect(); } catch (e) {} }
+      };
+      src.start(t0, offset || 0);
+      src.stop(t1);
+    }
+    function envelope(param, t, peak, attack, decay) {
+      param.setValueAtTime(0.0001, t);
+      param.exponentialRampToValueAtTime(peak, t + attack);
+      param.exponentialRampToValueAtTime(0.0001, t + attack + decay);
+    }
+    // Filtered noise burst whose filter sweeps from f0 to f1.
+    function hiss(v, t, type, f0, f1, q, peak, attack, decay) {
+      var s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+      s.buffer = noise; s.loop = true;
+      f.type = type; f.Q.value = q;
+      f.frequency.setValueAtTime(f0, t);
+      f.frequency.exponentialRampToValueAtTime(f1, t + attack + decay);
+      envelope(g.gain, t, peak, attack, decay);
+      s.connect(f); f.connect(g); g.connect(v.g);
+      v.nodes.push(f, g);
+      run(v, s, t, t + attack + decay + 0.02, Math.random() * 0.9);
+    }
+    // Oscillator whose pitch glides from f0 to f1.
+    function tone(v, t, type, f0, f1, peak, attack, decay) {
+      var o = ac.createOscillator(), g = ac.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(f0, t);
+      o.frequency.exponentialRampToValueAtTime(f1, t + attack + decay);
+      envelope(g.gain, t, peak, attack, decay);
+      o.connect(g); g.connect(v.g);
+      v.nodes.push(g);
+      run(v, o, t, t + attack + decay + 0.02);
+    }
+
+    var SOUNDS = {
+      // Cannon / cluster / tank fire: a deep thump with a puff of air. k = size.
+      boom: function (v, t, k) {
+        tone(v, t, "sine", 160, 42, Math.min(1, 0.85 * k), 0.004, 0.3);
+        hiss(v, t, "lowpass", 1500, 260, 0.7, Math.min(0.9, 0.5 * k), 0.003, 0.22);
+      },
+      // Explosion; k from 0.5 (bomblet) to 1.8 (vehicle).
+      blast: function (v, t, k) {
+        var d = 0.32 + 0.42 * k;
+        hiss(v, t, "lowpass", 700 + 800 * Math.min(k, 1.5), 90, 0.8, Math.min(1, 0.5 + 0.35 * k), 0.005, d);
+        tone(v, t, "sine", 92, 30, Math.min(1, 0.45 + 0.35 * k), 0.005, 0.22 + 0.22 * k);
+        if (k >= 1.3) hiss(v, t + 0.06, "bandpass", 420, 120, 0.9, 0.45, 0.02, d);   // rumbling tail
+      },
+      gun: function (v, t) {
+        hiss(v, t, "highpass", 1900, 700, 0.7, 0.42, 0.001, 0.07);
+        tone(v, t, "square", 900, 120, 0.1, 0.001, 0.045);
+      },
+      rocket: function (v, t) {
+        hiss(v, t, "bandpass", 320, 2600, 1.6, 0.55, 0.03, 0.42);
+        tone(v, t, "sawtooth", 110, 55, 0.1, 0.01, 0.3);
+      },
+      zap: function (v, t) { tone(v, t, "sine", 1700, 420, 0.12, 0.003, 0.13); },
+      // A soldier goes down.
+      hit: function (v, t) {
+        hiss(v, t, "lowpass", 700, 200, 0.8, 0.45, 0.002, 0.09);
+        tone(v, t, "triangle", 260, 110, 0.2, 0.005, 0.14);
+      },
+      // Bullet on armour.
+      tink: function (v, t) {
+        tone(v, t, "square", 2200 + Math.random() * 500, 1700, 0.06, 0.001, 0.05);
+        hiss(v, t, "highpass", 3200, 2600, 0.8, 0.12, 0.001, 0.04);
+      },
+      // An image or video breaking apart.
+      shatter: function (v, t) {
+        hiss(v, t, "highpass", 2600, 1700, 0.6, 0.3, 0.002, 0.28);
+        for (var i = 0; i < 3; i++) {
+          var f = 2200 + Math.random() * 2600;
+          tone(v, t + i * 0.035, "sine", f, f * 0.8, 0.05, 0.002, 0.12);
+        }
+      },
+      // Falling bomb / incoming shell; k = seconds until impact.
+      whistle: function (v, t, k) { tone(v, t, "sine", 1500, 420, 0.06, 0.06, Math.max(0.3, k)); },
+      // A soldier got away with the loot.
+      escape: function (v, t) {
+        tone(v, t, "triangle", 392, 370, 0.12, 0.01, 0.16);
+        tone(v, t + 0.17, "triangle", 330, 262, 0.12, 0.01, 0.3);
+      },
+      // Enemy vehicle incoming.
+      alert: function (v, t) {
+        tone(v, t, "square", 880, 880, 0.06, 0.005, 0.09);
+        tone(v, t + 0.16, "square", 880, 880, 0.06, 0.005, 0.09);
+      },
+      siren: function (v, t) {
+        for (var i = 0; i < 3; i++) {
+          tone(v, t + i * 0.36, "sawtooth", 620, 900, 0.06, 0.02, 0.16);
+          tone(v, t + i * 0.36 + 0.18, "sawtooth", 900, 620, 0.06, 0.02, 0.16);
+        }
+      },
+      // Rising notes: combos (k = combo size), unlocks, the blast report.
+      chime: function (v, t, k) {
+        for (var i = 0; i < k; i++) {
+          var f = NOTES[Math.min(i, NOTES.length - 1)];
+          tone(v, t + i * 0.07, "triangle", f, f, 0.14, 0.005, 0.2);
+        }
+      },
+      ui: function (v, t) { tone(v, t, "sine", 1100, 700, 0.06, 0.002, 0.05); }
+    };
+
+    function play(name, x, k) {
+      if (!live()) return;
+      var t = ac.currentTime;
+      if (t - (lastAt[name] || -1) < (GAP[name] || 0)) return;
+      if (voices >= HARD_CAP || (voices >= MAX_VOICES && !IMPORTANT[name])) return;
+      lastAt[name] = t;
+      try { SOUNDS[name](voice(x), t, k == null ? 1 : k); } catch (e) {}
+    }
+
+    // Continuous sounds. Each returns { g, level, p?, srcs, nodes }.
+    var LOOPS = {
+      flame: function () {
+        var s = ac.createBufferSource(), f = ac.createBiquadFilter(), body = ac.createBiquadFilter();
+        var g = ac.createGain(), lfo = ac.createOscillator(), lg = ac.createGain();
+        s.buffer = noise; s.loop = true;
+        f.type = "lowpass"; f.frequency.value = 1100; f.Q.value = 0.6;
+        body.type = "peaking"; body.frequency.value = 280; body.gain.value = 9; body.Q.value = 1;
+        g.gain.value = 0;
+        lfo.frequency.value = 7; lg.gain.value = 0.07;      // flicker
+        lfo.connect(lg); lg.connect(g.gain);
+        s.connect(f); f.connect(body); body.connect(g); g.connect(out);
+        s.start(0, Math.random() * 0.9); lfo.start();
+        return { g: g, level: 0.4, srcs: [s, lfo], nodes: [s, f, body, g, lfo, lg] };
+      },
+      laser: function () {
+        var o1 = ac.createOscillator(), o2 = ac.createOscillator(), vib = ac.createOscillator();
+        var vg = ac.createGain(), f = ac.createBiquadFilter(), g = ac.createGain();
+        o1.type = "sawtooth"; o1.frequency.value = 196;
+        o2.type = "square"; o2.frequency.value = 393;
+        vib.frequency.value = 11; vg.gain.value = 9;         // wobble
+        vib.connect(vg); vg.connect(o1.frequency); vg.connect(o2.frequency);
+        f.type = "lowpass"; f.frequency.value = 2400; f.Q.value = 7;
+        g.gain.value = 0;
+        o1.connect(f); o2.connect(f); f.connect(g); g.connect(out);
+        o1.start(); o2.start(); vib.start();
+        return { g: g, level: 0.09, srcs: [o1, o2, vib], nodes: [o1, o2, vib, vg, f, g] };
+      },
+      bomber: function () {
+        var o1 = ac.createOscillator(), o2 = ac.createOscillator(), f = ac.createBiquadFilter(), g = ac.createGain();
+        o1.type = o2.type = "sawtooth";
+        o1.frequency.value = 58; o2.frequency.value = 61.5;   // two engines beating
+        f.type = "lowpass"; f.frequency.value = 380;
+        g.gain.value = 0;
+        o1.connect(f); o2.connect(f); f.connect(g);
+        var L = { g: g, level: 0.12, srcs: [o1, o2], nodes: [o1, o2, f, g] };
+        if (ac.createStereoPanner) { L.p = ac.createStereoPanner(); g.connect(L.p); L.p.connect(out); L.nodes.push(L.p); }
+        else g.connect(out);
+        o1.start(); o2.start();
+        return L;
+      }
+    };
+    // Starts or stops a continuous sound; x pans it.
+    function loop(name, on, x) {
+      var L = loops[name];
+      if (on && live()) {
+        if (!L) {
+          try { L = loops[name] = LOOPS[name](); } catch (e) { return; }
+          L.g.gain.setTargetAtTime(L.level, ac.currentTime, 0.03);
+        }
+        if (L.p && x != null) L.p.pan.setTargetAtTime(pan(x), ac.currentTime, 0.1);
+      } else if (L) {
+        stopLoop(name);
+      }
+    }
+    function stopLoop(name) {
+      var L = loops[name];
+      if (!L) return;
+      delete loops[name];
+      try {
+        var t = ac.currentTime;
+        L.g.gain.cancelScheduledValues(t);
+        L.g.gain.setTargetAtTime(0, t, 0.04);
+        for (var i = 0; i < L.srcs.length; i++) L.srcs[i].stop(t + 0.25);
+        L.srcs[0].onended = function () {
+          for (var j = 0; j < L.nodes.length; j++) { try { L.nodes[j].disconnect(); } catch (e) {} }
+        };
+      } catch (e) {}
+    }
+    function stopLoops() { for (var k in loops) stopLoop(k); }
+
+    function setMuted(m) {
+      muted = !!m;
+      if (muted) stopLoops();
+      if (out && ac) out.gain.setTargetAtTime(muted ? 0 : VOLUME, ac.currentTime, 0.02);
+      // While muted, pause the context (after the fade) so it uses no CPU; start() resumes it.
+      if (muted) setTimeout(function () {
+        if (muted && ac && ac.state === "running") ac.suspend()["catch"](function () {});
+      }, 120);
+    }
+    // Ends all sound; the context closes once the last notes have rung out.
+    function shutdown(afterMs) {
+      stopLoops();
+      var a = ac;
+      ac = null;
+      if (a) setTimeout(function () { a.close()["catch"](function () {}); }, afterMs || 0);
+    }
+
+    return { create: create, start: start, play: play, loop: loop, setMuted: setMuted,
+             muted: function () { return muted; }, shutdown: shutdown };
+  }());
 
   /* ── STYLE SHEET (removed again on teardown) ─────────────────────────────── */
   var styleEl = document.createElement("style");
@@ -371,6 +671,16 @@
     renderArsenal();
     if (isLobbed(mode)) restoreCursor();
     else htmlStyle.setProperty("cursor", "crosshair");
+    sfx.start();
+    sfx.play("ui");
+  }
+  // G / Shift+G: next / previous unlocked weapon.
+  function cycleWeapon(dir) {
+    var i = WEAPONS.indexOf(weaponById(mode)), n = WEAPONS.length;
+    for (var step = 1; step < n; step++) {
+      var w = WEAPONS[(i + dir * step + n * 2) % n];
+      if (isUnlocked(w)) { selectWeapon(w.id); return; }
+    }
   }
   renderArsenal();
 
@@ -415,12 +725,16 @@
       setRing(dangerBtn, "rgba(255,107,74,0.5)", "cbRing 2.5s ease-out infinite");
     }
   }
-  dangerBtn.addEventListener("click", function(e) {
-    e.preventDefault(); e.stopPropagation();
+  function toggleDanger() {
+    sfx.start();
     dangerForced = !dangerForced;
     if (dangerForced) enterDanger();   // user-triggered surge starts now
     else exitDanger();                 // stop now
     renderDangerBtn();
+  }
+  dangerBtn.addEventListener("click", function(e) {
+    e.preventDefault(); e.stopPropagation();
+    toggleDanger();
   });
   renderDangerBtn();
 
@@ -486,6 +800,7 @@
     bomberTimer = Math.min(bomberTimer, 7);
     setVignette(dangerForced ? "forced" : "active");
     shakeScreen();
+    sfx.play("siren");
   }
   function exitDanger() {
     dangerState = "normal";
@@ -547,6 +862,14 @@
   var hudBest = hudSpan("color:#ffd24a");
   hudSpan("opacity:.35").textContent = "|";
   var hudStolen = hudSpan("color:#9ab37a");
+  hudSpan("opacity:.35").textContent = "|";
+  // Sound on/off (M). The HUD ignores the pointer; only this button takes clicks.
+  var muteBtn = document.createElement("button");
+  muteBtn.setAttribute("data-cb-ui", "1");
+  muteBtn.style.cssText = "all:unset;pointer-events:auto;cursor:pointer;margin:-4px -6px -4px -6px;padding:3px 6px;" +
+    "border-radius:10px;font:15px/1 system-ui,'Apple Color Emoji','Segoe UI Emoji',sans-serif;";
+  muteBtn.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); toggleMute(); });
+  hud.appendChild(muteBtn);
   wrapper.appendChild(hud);
 
   function renderHUD() {
@@ -554,6 +877,21 @@
     setText(hudBest, "🏆 " + best);
     setText(hudStolen, "🪖 " + stolen);
   }
+  function renderMute() {
+    var m = sfx.muted();
+    setText(muteBtn, m ? "🔇" : "🔊");
+    muteBtn.title = (m ? "Sound off" : "Sound on") + " · press M";
+    muteBtn.setAttribute("aria-label", m ? "Turn sound on" : "Turn sound off");
+  }
+  function toggleMute() {
+    var m = !sfx.muted();
+    sfx.setMuted(m);
+    if (!m) { sfx.start(); sfx.play("ui"); }
+    renderMute();
+    spawnFloater(viewW / 2, bannerShown ? 124 : 64, m ? "🔇 Sound off" : "🔊 Sound on", "#ffd24a", 14);
+    try { chrome.storage.local.set({ cbMuted: m }); } catch (e) {}
+  }
+  renderMute();
 
   /* ── SCORE, LIFETIME PROGRESS, UNLOCKS, COMBOS ───────────────────────────────
      Best score and lifetime score are written at most once every 1.5s (and on
@@ -562,11 +900,13 @@
   var statsDirty = false, statsTimer = 0;
   function loadStats() {
     try {
-      chrome.storage.local.get(["cbBest", "cbTotalKills"], function(r){
+      chrome.storage.local.get(["cbBest", "cbTotalKills", "cbMuted"], function(r){
         r = r || {};
         var storedBest = typeof r.cbBest === "number" ? r.cbBest : 0;
         var storedTotal = typeof r.cbTotalKills === "number" ? r.cbTotalKills : 0;
+        bestBefore = storedBest;
         if (storedBest > best) best = storedBest;
+        if (r.cbMuted === true) { sfx.setMuted(true); renderMute(); }
         totalBase = Math.max(storedTotal, storedBest);
         unlocksKnown = true;
         markUnlocked();
@@ -606,6 +946,8 @@
       announced[w.id] = true;
       renderArsenal();
       spawnFloater(viewW / 2, viewH * 0.32, w.icon + " " + w.name + " UNLOCKED! · press " + (i + 1), "#ffd24a", 24, 2.6);
+      stats.unlocked.push(w);
+      sfx.play("chime", null, 7);
       chips[i].classList.remove("__cb_new");
       void chips[i].offsetWidth;   // restart the pop animation
       chips[i].classList.add("__cb_new");
@@ -618,7 +960,9 @@
   function registerKill(x, y) {
     comboCount = comboT > 0 ? comboCount + 1 : 1;
     comboT = COMBO_WINDOW;
+    if (comboCount > stats.bestCombo) stats.bestCombo = comboCount;
     if (comboCount < 2) return;
+    sfx.play("chime", null, Math.min(comboCount + 1, 6));
     var name = COMBO_NAMES[Math.min(comboCount, COMBO_NAMES.length - 1)];
     var bonus = Math.min(comboCount - 1, 5);
     spawnFloater(Math.max(90, Math.min(viewW - 90, x)), Math.max(70, y - 70), name + " +" + bonus, "#ff9a20", 20 + Math.min(comboCount, 6) * 2, 1.5);
@@ -626,7 +970,10 @@
   }
 
   /* ── FIRST-LAUNCH INTRO (shown once; again once when it gains new content) ── */
-  var INTRO_VERSION = 2;   // 2 = arsenal + enemy vehicles
+  var INTRO_VERSION = 3;   // 2 = arsenal + enemy vehicles, 3 = sound, keys, launch shortcut, blast report
+  function escHtml(t) {
+    return String(t).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; });
+  }
   function maybeShowIntro() {
     try {
       chrome.storage.local.get(["cbIntroSeen"], function(r){
@@ -634,12 +981,26 @@
       });
     } catch(e) { showIntro(false); }
   }
+  // The card sits between the score bar and the "pick weapons" hint, which points at the
+  // controls beside the cannon. In a short window the hint goes (the controls are outlined
+  // anyway) and, if needed, the card is scaled down so its button is never covered or cut off.
+  var INTRO_TOP = 46, HINT_BOTTOM = 170;
+  function fitIntro(ov) {
+    var hint = ov.firstChild, card = hint.nextSibling;
+    var h = card.offsetHeight, below = HINT_BOTTOM + hint.offsetHeight + 8;
+    if (h <= viewH - INTRO_TOP - below) { ov.style.paddingBottom = below + "px"; return; }
+    hint.style.display = "none";
+    below = HINT_BOTTOM;
+    ov.style.paddingBottom = below + "px";
+    var room = viewH - INTRO_TOP - below;
+    if (h > room) card.style.zoom = Math.max(0.6, room / h).toFixed(3);
+  }
   function showIntro(returning) {
     introActive = true;
     var ov = document.createElement("div");
     ov.setAttribute("data-cb-ui", "1");
     ov.style.cssText = [
-      "position:fixed;inset:0;z-index:2147483646;pointer-events:all;",
+      "position:fixed;inset:0;z-index:2147483646;pointer-events:all;box-sizing:border-box;padding:" + INTRO_TOP + "px 10px;",
       "display:flex;align-items:center;justify-content:center;",
       "background:rgba(0,0,0,0.62);backdrop-filter:blur(3px);font-family:system-ui,sans-serif;"
     ].join("");
@@ -647,12 +1008,12 @@
       return '<div style="display:flex;align-items:center;gap:10px;margin:6px 0"><div style="font-size:20px;min-width:50px;white-space:nowrap;text-align:center">' + icon + '</div><div>' + html + '</div></div>';
     };
     ov.innerHTML =
-      '<div style="position:fixed;bottom:170px;left:50%;transform:translateX(-50%);text-align:center;">'+
+      '<div style="position:fixed;bottom:' + HINT_BOTTOM + 'px;left:50%;transform:translateX(-50%);text-align:center;pointer-events:none">'+
         '<div style="animation:cbWiggle 1s ease-in-out infinite">'+
         '<div style="background:#ffd24a;color:#111;font-weight:800;font-size:12px;padding:5px 10px;border-radius:9px;margin-bottom:4px">Pick weapons (keys 1–6) &amp; ⚠️ Danger beside the cannon</div>'+
         '<div style="font-size:42px;line-height:1;color:#ffd24a;text-shadow:0 2px 8px rgba(0,0,0,.6)">↓</div>'+
       '</div></div>'+
-      '<div style="background:#15171a;color:#eee;max-width:430px;width:88%;border-radius:16px;font-size:13px;line-height:1.35;margin-bottom:150px;'+
+      '<div style="background:#15171a;color:#eee;max-width:430px;width:88%;flex:none;border-radius:16px;font-size:13px;line-height:1.35;'+
       'padding:18px 22px;box-shadow:0 20px 60px rgba(0,0,0,0.6);border:1px solid rgba(255,210,74,0.3)">'+
       '<div style="font-size:19px;font-weight:800;color:#ffd24a;margin-bottom:6px">' +
         (returning ? '🆕 New in BlastBlastBlast' : '🔥 Welcome to BlastBlastBlast') + '</div>'+
@@ -662,10 +1023,13 @@
       row('⚡💥', '<b>Laser &amp; Cluster bombs</b> — carve lines through text, or split one bomb into six.') +
       row('🛡️✈️', '<b>Enemy tanks &amp; bombers</b> attack the page. Several hits take them down!') +
       row('⚠️', '<b>Danger</b> — toggle a swarm of soldiers and vehicles from all sides.') +
+      row('⌨️🔊', '<b>Keys</b> — 1–6 or G weapons · D Danger · M sound · Esc ends with your blast report' +
+        (launchInfo.shortcut ? ' · <b>' + escHtml(launchInfo.shortcut) + '</b> launches on any page' : '') + '.') +
       '<button id="__cbIntroOk" style="margin-top:10px;width:100%;background:#ffd24a;color:#111;border:0;'+
       'border-radius:10px;padding:11px;font-weight:800;font-size:14px;cursor:pointer">Let\u2019s blast! 🚀</button></div>';
     document.documentElement.appendChild(ov);
     removeList.push(ov);
+    fitIntro(ov);
     function highlightToggles(on){
       [arsenal, dangerBtn].forEach(function(b){
         b.style.opacity = "1";
@@ -762,6 +1126,9 @@
   function beginFire(x, y) {
     if (introActive) return;          // wait until the intro is dismissed
     mouseX = x; mouseY = y;
+    sfx.start();
+    stats.used[mode] = true;
+    if (!stats.firstShotAt) stats.firstShotAt = performance.now();
     fireAt(x, y);
     held = true;
     if (mode === "gun") gunFireCd = GUN_FIRE_INTERVAL;
@@ -792,7 +1159,7 @@
     if (sol.dist < MIN_AIM_DIST) return;
 
     balls.push({
-      kind: kind || "ball",
+      kind: kind || "ball", shot: newShot(),
       x: m.x, y: m.y,
       vx: sol.vx, vy: sol.vy,
       trail: [], spin: 0,
@@ -802,6 +1169,7 @@
     });
 
     spawnMuzzleFlash(m.x, m.y);
+    sfx.play("boom", m.x, kind === "cluster" ? 0.8 : 1);
     hasAim = false;
     aimPower = 0;
     if (kind === "cluster") weaponCd = CLUSTER_COOLDOWN;
@@ -814,25 +1182,26 @@
     var dx = tx - m.x, dy = ty - m.y, dist = Math.hypot(dx, dy);
     if (dist < 40) return;
     rockets.push({ x: m.x, y: m.y, tx: tx, ty: ty, ang: Math.atan2(dy, dx), speed: 420,
-                   dist: dist, traveled: 0, smokeT: 0 });
+                   dist: dist, traveled: 0, smokeT: 0, shot: newShot() });
     spawnMuzzleFlash(m.x, m.y);
+    sfx.play("rocket", m.x);
     shakeScreen(3);
     weaponCd = ROCKET_COOLDOWN;
   }
-  function rocketBlast(x, y) {
-    explodeAt(x, y, { r: 70, killR: 112, mark: 1.45, shake: 12, particles: 1.7, dmg: 5 });
+  function rocketBlast(x, y, shot) {
+    explodeAt(x, y, { r: 70, killR: 112, mark: 1.45, shake: 12, particles: 1.7, dmg: 5, shot: shot });
   }
   function updateRockets(dt) {
     for (var i = rockets.length - 1; i >= 0; i--) {
       var r = rockets[i];
       r.speed = Math.min(r.speed + 2200 * dt, 1600);
       var step = r.speed * dt, ca = Math.cos(r.ang), sa = Math.sin(r.ang);
-      if (r.traveled + step >= r.dist) { rocketBlast(r.tx, r.ty); rockets.splice(i, 1); continue; }
+      if (r.traveled + step >= r.dist) { rocketBlast(r.tx, r.ty, r.shot); rockets.splice(i, 1); continue; }
       r.traveled += step;
       r.x += ca * step; r.y += sa * step;
       // A rocket that meets an enemy vehicle on the way explodes on it.
       var hitE = enemyNear(r.x, r.y, 4);
-      if (hitE) { rocketBlast(r.x, r.y); rockets.splice(i, 1); continue; }
+      if (hitE) { rocketBlast(r.x, r.y, r.shot); rockets.splice(i, 1); continue; }
       r.smokeT -= dt;
       if (r.smokeT <= 0) {
         r.smokeT = 0.016;
@@ -911,6 +1280,7 @@
   /* ── LASER: hold to burn a beam to the cursor; sweeping carves the text ─── */
   function fireLaser(dt) {
     var m = getMuzzle();
+    if (!laserBeam) sfx.play("zap", mouseX);
     laserBeam = { x0: m.x, y0: m.y, x1: mouseX, y1: mouseY };
     laserCarveT -= dt;
     var moved = lastCarve ? Math.hypot(mouseX - lastCarve.x, mouseY - lastCarve.y) : 1e9;
@@ -948,12 +1318,12 @@
   }
 
   /* ── CLUSTER BOMB: lobbed like the cannon, bursts into six bomblets ──────── */
-  function burstCluster(x, y) {
-    explodeAt(x, y, { r: 30, killR: 50, mark: 0.55, shake: 5, particles: 0.6, dmg: 2 });
+  function burstCluster(x, y, shot) {
+    explodeAt(x, y, { r: 30, killR: 50, mark: 0.55, shake: 5, particles: 0.6, dmg: 2, shot: shot });
     for (var i = 0; i < 6; i++) {
       var a = (i / 6) * Math.PI * 2 + (Math.random() - 0.5) * 0.5, sp = 120 + Math.random() * 120;
       bomblets.push({ x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp * 0.6 - 170 - Math.random() * 80,
-                      fuse: 0.42 + Math.random() * 0.3, blink: Math.random() * 6 });
+                      fuse: 0.42 + Math.random() * 0.3, blink: Math.random() * 6, shot: shot });
     }
   }
   function updateBomblets(dt) {
@@ -965,7 +1335,7 @@
       if (b.fuse <= 0) {
         bomblets.splice(i, 1);
         explodeAt(Math.max(4, Math.min(viewW - 4, b.x)), Math.max(4, Math.min(viewH - 4, b.y)),
-          { r: 34, killR: 62, mark: 0.65, shake: 4, particles: 0.7, dmg: 2 });
+          { r: 34, killR: 62, mark: 0.65, shake: 4, particles: 0.7, dmg: 2, shot: b.shot });
       }
     }
   }
@@ -995,9 +1365,10 @@
     bullets.push({
       x: m.x, y: m.y, px: m.x, py: m.y,
       vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd,
-      life: 1.4
+      life: 1.4, shot: newShot()
     });
     spawnMuzzleFlash(m.x, m.y);
+    sfx.play("gun", m.x);
   }
 
   // shortest distance from point P to segment AB (for fast bullet hit tests)
@@ -1021,6 +1392,7 @@
         if (s.state === "dead") continue;
         if (segDist(s.x, s.y - 20, b.px, b.py, b.x, b.y) < 15) {
           killSoldier(s);
+          markHit(b.shot);
           hit = true;
           break;
         }
@@ -1028,6 +1400,8 @@
       if (!hit) {
         var e = enemyOnSegment(b.px, b.py, b.x, b.y, 2);
         if (e) {
+          markHit(b.shot);
+          sfx.play("tink", b.x);
           hitEnemy(e, 0.5);
           for (var q = 0; q < 4; q++) {
             var qa = Math.random()*Math.PI*2, qs = 60+Math.random()*90;
@@ -1177,8 +1551,8 @@
       // Explode exactly when flight time elapses → lands precisely at cursor target
       if (b.elapsed >= b.T) {
         b.exploded = true;
-        if (b.kind === "cluster") burstCluster(b.landX, b.landY);
-        else explodeAt(b.landX, b.landY);
+        if (b.kind === "cluster") burstCluster(b.landX, b.landY, b.shot);
+        else explodeAt(b.landX, b.landY, { shot: b.shot });
         balls.splice(i, 1);
       }
     }
@@ -1193,21 +1567,27 @@
   var blastResults = [];
   // o (all optional): r page radius, killR soldier radius, mark scale (0 = none),
   // shake amount (0 = none), particles scale (0 = none), dmg to enemy vehicles,
-  // burn (text turns to embers), enemy (fired by an enemy: no points).
+  // burn (text turns to embers), enemy (fired by an enemy: no points),
+  // shot (the player's shot this blast belongs to, for accuracy).
   function explodeAt(cx, cy, o) {
     o = o || {};
     var r = o.r || BLAST_RADIUS;
     var killR = o.killR || SOLDIER_KILL_R;
     var ps = o.particles === undefined ? 1 : o.particles;
-    if (ps) spawnExplosionParticles(cx, cy, ps);
+    if (ps) {
+      spawnExplosionParticles(cx, cy, ps);
+      sfx.play("blast", cx, ps);
+    }
     if (o.mark !== 0) createBlastMark(cx, cy, o.mark || 1);
     if (o.shake !== 0) shakeScreen(o.shake);
     // Kill any soldiers caught in the blast (drops their loot as a falling shard)
+    var killed = 0;
     for (var si = soldiers.length-1; si >= 0; si--) {
       var sol = soldiers[si];
-      if (Math.hypot(sol.x - cx, (sol.y-18) - cy) < killR) killSoldier(sol, !o.enemy);
+      if (sol.state !== "dead" && Math.hypot(sol.x - cx, (sol.y-18) - cy) < killR) { killSoldier(sol, !o.enemy); killed++; }
     }
-    if (!o.enemy) damageEnemiesAt(cx, cy, killR * 0.75, o.dmg === undefined ? 3 : o.dmg);
+    if (!o.enemy && damageEnemiesAt(cx, cy, killR * 0.75, o.dmg === undefined ? 3 : o.dmg)) killed++;
+    if (killed) markHit(o.shot);
     if (blastQueue.length < MAX_JOBS) blastQueue.push({ cx: cx, cy: cy, r: r, burn: !!o.burn });
   }
 
@@ -1378,6 +1758,7 @@
   function flingElement(el, cx, cy, rect, R) {
     if (scattered.has(el) || hiddenSet.has(el)) return;
     scattered.add(el);
+    stats.pieces++;
     if (flung.length >= MAX_FLUNG) { hideEl(el); return; }   // too much already in the air
     var c = cloneForFlight(el, rect.left, rect.top, rect.width, rect.height);
     hideEl(el);
@@ -1640,6 +2021,7 @@
       if (st.bits[c.i]) continue;
       for (var k = 0; k < c.n; k++) st.bits[c.i + k] = 1;
       st.count++;
+      stats.letters++;
       var t = touched.get(c.node);
       if (!t) { t = { st: st, runs: [] }; touched.set(c.node, t); }
       t.runs.push([c.i, c.i + c.n]);
@@ -1756,6 +2138,8 @@
     var el = m.el, rect = m.rect;
     if (shattered.has(el)) return;
     shattered.add(el);
+    stats.pieces++;
+    sfx.play("shatter", rect.left + rect.width / 2);
     var snap = snapshotMedia(el, rect, m.cs || getComputedStyle(el));
     hideEl(el);
     if (!snap) return;
@@ -2474,6 +2858,7 @@
   // credit: false when an enemy shell killed the soldier (no points for the player).
   function killSoldier(s, credit) {
     if (s.state === "dead") return;
+    sfx.play("hit", s.x);
     for (var k = 0; k < 16; k++) {
       var a = Math.random()*Math.PI*2, spd = 50+Math.random()*150, rr = Math.random();
       var type, color, size, life;
@@ -2504,6 +2889,7 @@
     s.rot       = 0;
     s.rotSpeed  = (Math.random() < 0.5 ? -1 : 1) * (180 + Math.random()*120);
     if (credit === false) return;
+    stats.soldiers++;
     spawnFloater(s.x, s.y - 44, "+1 💥", "#ffd24a", 16);
     addScore(1);
     registerKill(s.x, s.y - 44);
@@ -2514,6 +2900,7 @@
     if (s.loot) { removeNode(s.loot.clone); dropRanges(s.loot.ranges); }
     s.loot = null;
     stolen++;
+    sfx.play("escape", s.x);
     var fx = Math.max(30, Math.min(viewW-30, s.x));
     var fy = Math.max(40, Math.min(viewH-40, s.y));
     spawnFloater(fx, fy, "😡 GOT AWAY!", "#ff5544", 16);
@@ -2608,6 +2995,7 @@
       stopX: viewW * (0.12 + Math.random() * 0.76), fireT: 1, shots: 0,
       turret: fromLeft ? 0.5 : Math.PI - 0.5, aimX: 0, aimY: 0, hitT: 0, wheel: 0, recoil: 0 });
     spawnFloater(fromLeft ? 110 : viewW - 110, y - 46, "⚠️ ENEMY TANK!", "#ff5544", 16, 1.6);
+    sfx.play("alert");
   }
   function spawnBomber() {
     var fromLeft = Math.random() < 0.5;
@@ -2616,6 +3004,7 @@
       speed: 150 + Math.random() * 40, hp: 3, maxHp: 3, radius: 28, dropT: 0.5,
       bombs: 5 + Math.floor(Math.random() * 3), hitT: 0, prop: 0 });
     spawnFloater(fromLeft ? 130 : viewW - 130, y + 34, "✈️ BOMBER INCOMING!", "#ff5544", 16, 1.6);
+    sfx.play("alert");
   }
   function countEnemies(kind) {
     var n = 0;
@@ -2681,6 +3070,8 @@
     var sol = solveLaunch(mx, my, e.aimX, e.aimY);
     enemyShots.push({ kind: "shell", x: mx, y: my, vx: sol.vx, vy: sol.vy, T: sol.T, t: 0, tx: e.aimX, ty: e.aimY });
     e.recoil = 1;
+    sfx.play("boom", mx, 0.6);
+    sfx.play("whistle", e.aimX, sol.T);
     mFlashes.push({ x: mx, y: my, life: 0.16, maxLife: 0.16,
       sparks: [{ a: e.turret, len: 18 }, { a: e.turret - 0.45, len: 11 }, { a: e.turret + 0.45, len: 11 }] });
   }
@@ -2691,8 +3082,9 @@
     if (e.dropT <= 0 && e.bombs > 0 && e.x > 40 && e.x < viewW - 40) {
       e.dropT = 0.42 + Math.random() * 0.25;
       e.bombs--;
-      enemyShots.push({ kind: "bomb", x: e.x, y: e.y + 8, vx: e.dir * e.speed * 0.55, vy: 30,
-                        ty: Math.min(viewH * PLAY_TOP_FRAC, e.y + 120 + Math.random() * viewH * 0.4) });
+      var bombTy = Math.min(viewH * PLAY_TOP_FRAC, e.y + 120 + Math.random() * viewH * 0.4);
+      enemyShots.push({ kind: "bomb", x: e.x, y: e.y + 8, vx: e.dir * e.speed * 0.55, vy: 30, ty: bombTy });
+      sfx.play("whistle", e.x, Math.sqrt(2 * Math.max(10, bombTy - e.y) / 520));
     }
     return (e.dir > 0 && e.x > viewW + 90) || (e.dir < 0 && e.x < -90);
   }
@@ -2736,11 +3128,13 @@
     }
   }
   function damageEnemiesAt(x, y, R, dmg) {
-    if (!dmg) return;
+    if (!dmg) return 0;
+    var n = 0;
     for (var i = enemies.length - 1; i >= 0; i--) {
       var e = enemies[i], d = Math.hypot(e.x - x, enemyCY(e) - y);
-      if (d < R + e.radius) hitEnemy(e, d < e.radius ? dmg : dmg * 0.6);
+      if (d < R + e.radius) { hitEnemy(e, d < e.radius ? dmg : dmg * 0.6); n++; }
     }
+    return n;
   }
   function hitEnemy(e, dmg) {
     if (e.hp <= 0) return;
@@ -2752,6 +3146,8 @@
     var idx = enemies.indexOf(e);
     if (idx >= 0) enemies.splice(idx, 1);
     var tank = e.kind === "tank", pts = tank ? 5 : 3, cy = enemyCY(e);
+    if (tank) stats.tanks++; else stats.bombers++;
+    sfx.play("boom", e.x, 1.3);
     for (var k = 0; k < 3; k++) spawnExplosionParticles(e.x + (Math.random() - 0.5) * 44, cy + (Math.random() - 0.5) * 24, 1.2);
     explodeAt(e.x, cy, { r: 52, killR: 80, mark: tank ? 1.2 : 0.8, shake: 14, particles: 1.4, dmg: 4 });
     spawnFloater(e.x, cy - 44, "+" + pts + (tank ? " 🔥 TANK DOWN!" : " ✈️ BOMBER DOWN!"), "#ffd24a", 18, 1.6);
@@ -3078,6 +3474,14 @@
     }
   }
 
+  function updateSoundLoops() {
+    var bomber = null;
+    for (var i = 0; i < enemies.length && !bomber; i++) if (enemies[i].kind === "bomber") bomber = enemies[i];
+    sfx.loop("flame", mode === "flame" && held && !introActive);
+    sfx.loop("laser", !!laserBeam);
+    sfx.loop("bomber", !!bomber, bomber && bomber.x);
+  }
+
   function frame(ts) {
     var dt = Math.max(0, Math.min((ts-lastTime)/1000, 0.05));
     lastTime = ts;
@@ -3101,6 +3505,7 @@
     updateSoldiers(dt);
     updateEnemies(dt);
     updateMarks();
+    updateSoundLoops();
     renderCraters();
     renderDebris();
     renderBlood();
@@ -3129,6 +3534,7 @@
   removeList.push(marksLayer);
   resizeCanvas();
   renderHUD();
+  sfx.create();     // now, while nothing is animating yet (see SOUND)
   loadStats();
   maybeShowIntro();
   // Keys must reach the page, not an embedded frame that had focus.
@@ -3141,16 +3547,21 @@
   /* ── EVENTS ──────────────────────────────────────────────────────────────── */
   function onResize() { resizeCanvas(); }
   window.addEventListener("resize", onResize);
+  // Esc exits; 1–6 / G (Shift+G back) pick a weapon, D toggles Danger, M mutes.
+  // Other keys, and keys typed into fields, are left to the page.
   function onKey(e) {
     if (e.key === "Escape" || e.keyCode === 27) { destroy(); return; }
-    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || !e.key || e.key.length !== 1) return;
     var t = e.target;
     if (t && (t.isContentEditable || /^(input|textarea|select)$/.test(t.localName || ""))) return;
-    var idx = "123456".indexOf(e.key);
-    if (e.key.length !== 1 || idx < 0) return;
+    var k = e.key.toLowerCase(), idx = "123456".indexOf(k);
+    if (idx >= 0) selectWeapon(WEAPONS[idx].id);
+    else if (k === "g") cycleWeapon(e.shiftKey ? -1 : 1);
+    else if (k === "d") toggleDanger();
+    else if (k === "m") toggleMute();
+    else return;
     e.preventDefault();
     e.stopPropagation();
-    selectWeapon(WEAPONS[idx].id);
   }
   window.addEventListener("keydown", onKey, true);
 
@@ -3179,9 +3590,164 @@
   window.addEventListener("contextmenu", onClickBlock, true);
   window.addEventListener("pagehide",   flushStats, true);
 
+  /* ── BLAST REPORT (end-of-game card) ─────────────────────────────────────────
+     Shown when the player exits (Esc, Remove, the popup or the shortcut) after
+     playing. The page is already restored underneath and stays fully usable:
+     the card closes on Esc, ✕, any click on the page, or by itself after
+     REPORT_SECONDS (hovering it pauses the timer). It lives in a shadow root
+     so page styles can't reach it. */
+  var REPORT_SECONDS = 10;
+  var RANKS = [[0, "Rookie"], [5, "Gunner"], [15, "Demolition expert"], [30, "Page wrecker"],
+               [60, "Chaos commander"], [100, "Legend of the blast"]];
+  var REPORT_CSS = [
+    ":host{all:initial}",
+    ".card{box-sizing:border-box;position:relative;overflow:hidden;width:min(380px,calc(100vw - 24px));padding:14px 16px 16px;",
+      "background:#15171a;color:#eee;border:1px solid rgba(255,210,74,.35);border-radius:16px;box-shadow:0 18px 50px rgba(0,0,0,.55);",
+      "font:13px/1.35 system-ui,-apple-system,'Segoe UI',sans-serif;text-align:left;cursor:default}",
+    ".x{all:unset;position:absolute;top:8px;right:10px;width:24px;height:24px;border-radius:8px;text-align:center;line-height:24px;",
+      "font-size:14px;color:#aaa;cursor:pointer}",
+    ".x:hover{background:rgba(255,255,255,.1);color:#fff}",
+    ".top{display:flex;align-items:center;gap:8px;padding-right:28px}",
+    ".title{font-weight:800;font-size:14px;letter-spacing:.6px;color:#ffd24a}",
+    ".rank{font-size:11.5px;font-weight:700;color:#ff9a20;background:rgba(255,154,32,.13);border-radius:999px;padding:2px 8px}",
+    ".score{display:flex;align-items:baseline;gap:6px;margin:6px 0 10px}",
+    ".pts{font-size:34px;font-weight:800;line-height:1;color:#fff}",
+    ".unit{font-size:13px;color:#aaa}",
+    ".best{margin-left:auto;font-size:12px;font-weight:700;color:#9a9a9a}",
+    ".best.new{color:#ffd24a}",
+    ".grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}",
+    ".tile{background:rgba(255,255,255,.06);border-radius:10px;padding:7px 8px;min-width:0}",
+    ".v{font-size:16px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+    ".l{font-size:10.5px;color:#9a9a9a;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+    ".line{margin-top:9px;font-size:12px;color:#c8c8c8}",
+    ".unlock{color:#ffd24a;font-weight:700}",
+    ".foot{margin-top:9px;font-size:11px;color:#8a8a8a}",
+    "kbd{font:600 11px/1 system-ui,sans-serif;color:#eee;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.18);",
+      "border-radius:5px;padding:1px 5px}",
+    ".bar{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,.06)}",
+    ".fill{height:100%;background:linear-gradient(90deg,#ff6a00,#ffd24a);transform-origin:left center}"
+  ].join("");
+
+  function fmtTime(sec) { var m = Math.floor(sec / 60), s = sec % 60; return m + ":" + (s < 10 ? "0" : "") + s; }
+  function el(parent, tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+
+  // Returns true if the card was shown.
+  function showReport() {
+    if (!stats.firstShotAt && !score) return false;           // launched and left without playing
+    var host = document.createElement("div");
+    host.id = "__cb_report";
+    host.setAttribute("data-cb-ui", "1");
+    host.style.cssText = "all:initial!important;display:block!important;position:fixed!important;left:50%!important;" +
+      "bottom:24px!important;transform:translateX(-50%)!important;z-index:2147483647!important;" +
+      "visibility:visible!important;opacity:1!important;pointer-events:auto!important;";
+    var root = host.attachShadow({ mode: "open" });
+    try {
+      var sheet = new CSSStyleSheet();     // adopted sheets aren't blocked by a page's style CSP
+      sheet.replaceSync(REPORT_CSS);
+      root.adoptedStyleSheets = [sheet];
+    } catch (e) {
+      el(root, "style", null, REPORT_CSS);
+    }
+    var card = el(root, "div", "card");
+    card.setAttribute("role", "status");
+    var x = el(card, "button", "x", "✕");
+    x.title = "Close (Esc)";
+    x.setAttribute("aria-label", "Close the blast report");
+
+    var rank = RANKS[0][1];
+    for (var r = 0; r < RANKS.length; r++) if (score >= RANKS[r][0]) rank = RANKS[r][1];
+    var top = el(card, "div", "top");
+    el(top, "span", "title", "💥 BLAST REPORT");
+    el(top, "span", "rank", rank);
+
+    var sc = el(card, "div", "score");
+    el(sc, "span", "pts", String(score));
+    el(sc, "span", "unit", score === 1 ? "point" : "points");
+    var newBest = score > 0 && score > bestBefore;
+    el(sc, "span", newBest ? "best new" : "best", newBest ? "🏆 New best!" : "🏆 Best " + best);
+
+    var grid = el(card, "div", "grid");
+    function tile(icon, value, label) {
+      var t = el(grid, "div", "tile");
+      el(t, "div", "v", icon + " " + value);
+      el(t, "div", "l", label);
+    }
+    var secs = Math.max(1, Math.round((performance.now() - (stats.firstShotAt || performance.now())) / 1000));
+    tile("🪖", stats.soldiers, stats.soldiers === 1 ? "soldier" : "soldiers");
+    if (stats.tanks) tile("🛡️", stats.tanks, stats.tanks === 1 ? "tank" : "tanks");
+    if (stats.bombers) tile("✈️", stats.bombers, stats.bombers === 1 ? "bomber" : "bombers");
+    if (stats.letters) tile("🔤", stats.letters, stats.letters === 1 ? "letter" : "letters");
+    if (stats.pieces) tile("🖼️", stats.pieces, "images & icons");
+    if (stats.shots >= 5) tile("🎯", Math.round(stats.hits / stats.shots * 100) + "%", "accuracy");
+    if (stats.bestCombo >= 2) tile("⚡", "×" + stats.bestCombo, "best combo");
+    if (stolen) tile("😡", stolen, "stolen");
+    tile("⏱️", fmtTime(secs), "time");
+
+    var used = WEAPONS.filter(function (w) { return stats.used[w.id]; }).map(function (w) { return w.icon; });
+    if (used.length) el(card, "div", "line", "Weapons: " + used.join(" "));
+    if (stats.unlocked.length) {
+      el(card, "div", "line unlock", "🔓 Unlocked: " + stats.unlocked.map(function (w) { return w.icon + " " + w.name.charAt(0) + w.name.slice(1).toLowerCase(); }).join(" · "));
+    }
+    var foot = el(card, "div", "foot", "Play again: click the BlastBlastBlast icon");
+    if (launchInfo.shortcut) {
+      foot.appendChild(document.createTextNode(" or press "));
+      el(foot, "kbd", null, launchInfo.shortcut);
+    }
+    var fill = el(el(card, "div", "bar"), "div", "fill");
+    document.documentElement.appendChild(host);
+
+    var closed = false, timer = null, barAnim = null;
+    function close(now) {
+      if (closed) return;
+      closed = true;
+      window.removeEventListener("keydown", onReportKey, true);
+      window.removeEventListener("pointerdown", onReportDown, true);
+      if (window.__cbCloseReport === close) window.__cbCloseReport = null;
+      clearTimeout(timer);
+      try { if (barAnim) barAnim.cancel(); } catch (e) {}
+      if (now === true || !card.animate) { removeNode(host); return; }
+      card.animate([{ opacity: 1 }, { opacity: 0, transform: "translateY(8px)" }], { duration: 160, easing: "ease-in", fill: "forwards" })
+        .onfinish = function () { removeNode(host); };
+      setTimeout(function () { removeNode(host); }, 400);      // if the animation can't run (hidden tab)
+    }
+    function onReportKey(e) { if (e.key === "Escape" || e.keyCode === 27) close(); }
+    function onReportDown(e) {
+      var path = e.composedPath ? e.composedPath() : [];
+      if (path.indexOf(host) < 0) close();                     // clicks on the page close it and go through
+    }
+    x.addEventListener("click", function (e) { e.stopPropagation(); close(); });
+    window.__cbCloseReport = close;
+    // Listen from the next task, so the Esc / click that ended the game doesn't also close the card.
+    setTimeout(function () {
+      if (closed) return;
+      window.addEventListener("keydown", onReportKey, true);
+      window.addEventListener("pointerdown", onReportDown, true);
+    }, 0);
+
+    if (card.animate) {
+      card.animate([{ opacity: 0, transform: "translateY(16px)" }, { opacity: 1, transform: "none" }],
+                   { duration: 220, easing: "cubic-bezier(.2,.9,.3,1.15)" });
+      barAnim = fill.animate([{ transform: "scaleX(1)" }, { transform: "scaleX(0)" }],
+                             { duration: REPORT_SECONDS * 1000, easing: "linear", fill: "forwards" });
+      barAnim.onfinish = function () { close(); };
+      host.addEventListener("mouseenter", function () { if (!closed) barAnim.pause(); });
+      host.addEventListener("mouseleave", function () { if (!closed) barAnim.play(); });
+    } else {
+      timer = setTimeout(close, REPORT_SECONDS * 1000);
+    }
+    return true;
+  }
+
   /* ── TEARDOWN — restores the page completely ─────────────────────────────── */
+  // Returns true if the blast report is now showing.
   function destroy() {
-    if (!gameActive) return;
+    if (!gameActive) return false;
     gameActive = false;
     held = false;
     if (animId) cancelAnimationFrame(animId);
@@ -3222,8 +3788,15 @@
     fbOriginal.clear();
     lootPool = []; lootScan = null;
 
+    // The page is back to normal; now show how it went.
+    var reported = false;
+    try { reported = showReport(); } catch (e) {}
+    if (reported) sfx.play("chime", null, score > bestBefore && score > 0 ? 7 : 4);
+    sfx.shutdown(reported ? 1800 : 0);
+
     window.__cannonBlastActive = false;
     delete window.__cannonBlastDestroy;
+    return reported;
   }
 
   window.__cannonBlastDestroy = destroy;

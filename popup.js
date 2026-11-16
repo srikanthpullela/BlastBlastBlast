@@ -1,26 +1,17 @@
 /* BlastBlastBlast — popup controller
- * Injects the game into the active tab and toggles it on/off.
+ * Injects the game into the active tab and toggles it on/off. The page checks
+ * and the inject / remove calls live in launcher.js (shared with the
+ * keyboard shortcut in background.js).
  */
 "use strict";
 
 const launchBtn = document.getElementById("launchBtn");
 const statusEl = document.getElementById("status");
+const shortcutEl = document.getElementById("shortcut");
 
 let cannonActive = false;
 let activeTabId = null;
 let activeUrl = "";
-
-const MSG_PROTECTED = "Chrome doesn't allow extensions on this page. Open a regular website and try again.";
-const MSG_STORE = "Chrome doesn't allow extensions on the Chrome Web Store. Open another site and try again.";
-const MSG_FILE = "To play on local files, turn on “Allow access to file URLs” for BlastBlastBlast in chrome://extensions.";
-const MSG_PDF = "PDFs open in Chrome's built-in viewer, which can't be blasted. Try a regular web page.";
-const MSG_NOT_HTML = "This is an SVG or XML file, not a web page, so it can't be blasted. Try a regular website.";
-const MSG_ERROR_PAGE = "This tab is showing an error page. Load a website and try again.";
-const MSG_GENERIC = "BlastBlastBlast can't run on this page. Try a regular website.";
-
-// Pages Chrome never lets extensions script.
-const BLOCKED_SCHEME = /^(chrome|chrome-untrusted|chrome-search|chrome-extension|chrome-devtools|chrome-error|devtools|edge|brave|opera|vivaldi|about|view-source):/i;
-const STORE_URL = /^https?:\/\/(chromewebstore\.google\.com|chrome\.google\.com\/webstore|microsoftedge\.microsoft\.com\/addons)([/?#]|$)/i;
 
 /** Render the button + status to match current active state. */
 function render() {
@@ -43,20 +34,24 @@ function block(msg) {
   launchBtn.disabled = true;
 }
 
-/** Friendly explanation for a page we can't (or couldn't) inject into. */
-function restrictionFor(url) {
-  if (STORE_URL.test(url)) return MSG_STORE;
-  if (BLOCKED_SCHEME.test(url)) return MSG_PROTECTED;
-  return null;
-}
-
-function friendlyError(err, url) {
-  const msg = String((err && err.message) || err || "");
-  if (STORE_URL.test(url) || /gallery cannot be scripted/i.test(msg)) return MSG_STORE;
-  if (/error page/i.test(msg)) return MSG_ERROR_PAGE;
-  if (/^file:/i.test(url)) return MSG_FILE;
-  if (/cannot access|cannot be scripted|permission|not allowed|chrome:\/\//i.test(msg)) return MSG_PROTECTED;
-  return MSG_GENERIC;
+/** Shows the launch shortcut (or how to set one) under the hint. */
+async function renderShortcut() {
+  const key = await bbbShortcut();
+  shortcutEl.textContent = "";
+  shortcutEl.append(key ? "Shortcut: " : "No shortcut set · ");
+  if (key) {
+    const k = document.createElement("kbd");
+    k.textContent = key;
+    shortcutEl.append(k, " launches on any page · ");
+  }
+  const link = document.createElement("a");
+  link.href = "#";
+  link.textContent = key ? "change" : "set one";
+  link.addEventListener("click", (e) => {
+    e.preventDefault();
+    chrome.tabs.create({ url: "chrome://extensions/shortcuts" });
+  });
+  shortcutEl.append(link);
 }
 
 /** Get the current active tab. */
@@ -65,41 +60,8 @@ async function getActiveTab() {
   return tab;
 }
 
-/** Ask the page whether the game is running and what kind of document it is. Throws if the page can't be scripted. */
-async function probePage(tabId) {
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => ({
-      active: !!window.__cannonBlastActive,
-      type: document.contentType,
-      html: document.documentElement instanceof HTMLElement,
-    }),
-  });
-  const r = (results && results[0] && results[0].result) || {};
-  return { active: !!r.active, pdf: r.type === "application/pdf", html: r.html !== false };
-}
-
-/** Inject the game into the page's top frame (it adds and removes its own styles). */
-async function injectGame(tabId) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ["content.js"],
-  });
-}
-
-/** Tell the running game to tear itself down. */
-async function removeGame(tabId) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => {
-      if (typeof window.__cannonBlastDestroy === "function") {
-        window.__cannonBlastDestroy();
-      }
-    },
-  });
-}
-
 async function init() {
+  renderShortcut();
   let tab = null;
   try { tab = await getActiveTab(); } catch (e) { /* handled below */ }
   if (!tab || tab.id == null) {
@@ -107,31 +69,13 @@ async function init() {
     return;
   }
   activeUrl = tab.url || tab.pendingUrl || "";
-  const restricted = restrictionFor(activeUrl);
-  if (restricted) {
-    block(restricted);
-    return;
-  }
-  if (/^file:/i.test(activeUrl) && !(await chrome.extension.isAllowedFileSchemeAccess())) {
-    block(MSG_FILE);
+  const check = await bbbCheckTab(tab);
+  if (!check.ok) {
+    block(check.message);
     return;
   }
   activeTabId = tab.id;
-  try {
-    const probe = await probePage(activeTabId);
-    if (probe.pdf) {
-      block(MSG_PDF);
-      return;
-    }
-    if (!probe.html) {
-      block(MSG_NOT_HTML);
-      return;
-    }
-    cannonActive = probe.active;
-  } catch (err) {
-    block(friendlyError(err, activeUrl));
-    return;
-  }
+  cannonActive = check.active;
   render();
 }
 
@@ -140,18 +84,20 @@ launchBtn.addEventListener("click", async () => {
   launchBtn.disabled = true;
   try {
     if (cannonActive) {
-      await removeGame(activeTabId);
+      const reportShown = await bbbRemoveGame(activeTabId);
       cannonActive = false;
       setStatus("Cannon removed.");
+      // The page now shows the blast report; get out of its way.
+      if (reportShown) setTimeout(() => window.close(), 200);
     } else {
-      await injectGame(activeTabId);
+      await bbbInjectGame(activeTabId, "popup");
       cannonActive = true;
       setStatus("Cannon deployed! 🎯");
     }
     render();
   } catch (err) {
     console.error(err);
-    setStatus(friendlyError(err, activeUrl), true);
+    setStatus(bbbFriendlyError(err, activeUrl), true);
   } finally {
     launchBtn.disabled = false;
   }
