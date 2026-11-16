@@ -101,6 +101,14 @@ async function openPopup(b, extId, tab) {
 const popupState = (b, popup) => evaluate(b, popup.sessionId,
   `({ status: document.getElementById("status").textContent, disabled: document.getElementById("launchBtn").disabled, label: document.getElementById("launchBtn").textContent })`);
 
+async function tabKey(b, tab, digit) {
+  for (const type of ["keyDown", "keyUp"]) {
+    await b.send("Input.dispatchKeyEvent", { type, key: digit, code: "Digit" + digit, windowsVirtualKeyCode: 48 + Number(digit) }, tab.sessionId);
+  }
+}
+const arsenalLabel = (b, tab) => evaluate(b, tab.sessionId,
+  `(function(){ var a = document.getElementById("__cb_arsenal"); return a ? a.firstChild.textContent : null; })()`);
+
 async function tabClick(b, tab, x, y) {
   for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
     await b.send("Input.dispatchMouseEvent", { type, x, y, button: "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: 1 }, tab.sessionId);
@@ -159,6 +167,22 @@ async function main() {
     await sleep(800);
     const again = await evaluate(b, tab.sessionId, `!!document.getElementById("__cannon_wrapper")`);
     record("Relaunch works", again);
+
+    // Weapon unlocks (builds with the arsenal): Rockets need 10 lifetime points.
+    if (await arsenalLabel(b, tab) !== null) {
+      await tabKey(b, tab, "3");
+      await sleep(200);
+      const locked = await arsenalLabel(b, tab);
+      await evaluate(b, popup.sessionId, `document.getElementById("launchBtn").click()`);   // remove (saves stats)
+      await sleep(500);
+      await evaluate(b, popup.sessionId, `chrome.storage.local.set({ cbTotalKills: 10 })`);
+      await evaluate(b, popup.sessionId, `document.getElementById("launchBtn").click()`);   // launch again
+      await sleep(800);
+      await tabKey(b, tab, "3");
+      await sleep(200);
+      const unlocked = await arsenalLabel(b, tab);
+      record("Rockets locked for new players, unlocked at 10 points", /CANNON/.test(locked) && /ROCKETS/.test(unlocked), `${locked} → ${unlocked}`);
+    }
     await b.send("Target.closeTarget", { targetId: popup.targetId }).catch(() => {});
 
     // Restricted page and PDF: Launch is disabled with a friendly message.
