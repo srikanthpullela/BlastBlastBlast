@@ -14,10 +14,8 @@
       "16": "icons/icon16.png",
       "48": "icons/icon48.png"
    },
-   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlur/KFasGBkxQvra4TWl/Uxzj+IEmX0sEDxmk50fj+JlGiGvgeRV584VWjTEGQrDRbvhK573X/5a5nZn9QiMNYpmZtmKSz6QMuFx9p2IWxbSoMRrWus3WUZpknxeksdmXVxx0Jo/zoq0lsAwl9vllsJNnKMWVzkwWA6IapEyhCHn8zo33AFypROnsIejcc/toDLlwCNy6y5U4zJwXxtnLVci+Pp4vmqYGK7xILnvhVsnnaV2/iGVoUMD63ptu/fIX2Kqu1zdeqhIIIdtvBbIHabDdX9/rGL/b7Yi7qMNt3LwmeyfORSNq+JMA83ghzEdFFb3B01XXPjMSguClRc03QIDAQAB",
    "manifest_version": 3,
    "name": "BlastBlastBlast",
    "permissions": [ "scripting", "activeTab", "storage" ],
-   "update_url": "https://clients2.google.com/service/update2/crx",
    "version": "1.2.1"
 }
