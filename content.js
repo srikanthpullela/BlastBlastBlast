@@ -1,103 +1,49 @@
 /* ============================================================================
- * CANNON BLAST — content.js  v5 (2026-06-24)
- * - Trajectory dots hidden when off-screen; arc passes through freely
- * - cbScattered flag prevents same chars from re-exploding
- * - BLAST_RADIUS=65, no root transform shake, ball never exits top
- * - Blast marks are permanent until cannon is removed
+ * BlastBlastBlast — content.js
+ * Injected on demand into the top frame of the active tab (see popup.js).
+ *
+ *  - Overlay: fixed full-viewport canvas, SVG tank, Cannon/Gun and Danger
+ *    toggles, HUD (kills / best / stolen) and raiding soldiers.
+ *  - BLAST_RADIUS is 45px. Blast marks are anchored to the page, so they
+ *    scroll with it, and fade out after about 60s.
+ *  - Blasted text is hidden with the CSS Custom Highlight API: page text is
+ *    never rewritten, so nothing reflows. Flying characters, image fragments
+ *    and particles are drawn on the overlay canvas.
+ *  - Every frame does its layout reads first, then DOM writes, then canvas
+ *    work, so the game never forces extra synchronous layouts.
+ *  - Esc / Remove restores the page completely.
  * ========================================================================== */
 (function () {
   "use strict";
 
-  /* ── FRAME DETECTION ──────────────────────────────────────────────────────
-     The game itself only runs in the TOP frame. Every sub-frame (ads, video
-     embeds like YouTube / Dailymotion, etc.) instead runs a lightweight
-     forwarder that relays pointer activity up to the top frame so aiming and
-     firing keep working even while the cursor is hovering an iframe. */
-  var IS_TOP = false;
-  try { IS_TOP = (window.top === window.self); } catch (e) { IS_TOP = false; }
-
-  if (!IS_TOP) {
-    if (window.__cbFrameBridge) return;
-    window.__cbFrameBridge = true;
-
-    var cbActive = false;
-
-    function cbPostUp(kind, x, y) {
-      try { window.parent.postMessage({ __cbFrame: true, kind: kind, x: x, y: y }, "*"); } catch (e) {}
-    }
-    function cbChildOffset(src) {
-      var ifr = document.getElementsByTagName("iframe");
-      for (var i = 0; i < ifr.length; i++) {
-        var w = null; try { w = ifr[i].contentWindow; } catch (e2) {}
-        if (w && w === src) {
-          var r = ifr[i].getBoundingClientRect();
-          return { x: r.left + (ifr[i].clientLeft || 0), y: r.top + (ifr[i].clientTop || 0) };
-        }
-      }
-      return null;
-    }
-    function cbBroadcastDown(msg) {
-      var ifr = document.getElementsByTagName("iframe");
-      for (var i = 0; i < ifr.length; i++) {
-        try { ifr[i].contentWindow.postMessage(msg, "*"); } catch (e3) {}
-      }
-    }
-    window.addEventListener("message", function (e) {
-      var d = e.data;
-      if (!d) return;
-      if (d.__cbControl) {            // activation state from above — relay further down
-        cbActive = !!d.active;
-        cbBroadcastDown(d);
-        return;
-      }
-      if (d.__cbFrame) {             // a descendant's coords — translate to our space & bubble up
-        if (d.kind === "escape") { try { window.parent.postMessage(d, "*"); } catch (e4) {} return; }
-        var off = cbChildOffset(e.source);
-        if (!off) return;
-        cbPostUp(d.kind, d.x + off.x, d.y + off.y);
-      }
-    }, true);
-
-    window.addEventListener("pointermove", function (e) {
-      if (cbActive) cbPostUp("move", e.clientX, e.clientY);
-    }, true);
-    window.addEventListener("pointerdown", function (e) {
-      if (!cbActive) return;
-      e.preventDefault(); e.stopImmediatePropagation();
-      cbPostUp("down", e.clientX, e.clientY);
-    }, true);
-    window.addEventListener("pointerup", function (e) {
-      if (cbActive) cbPostUp("up", e.clientX, e.clientY);
-    }, true);
-    window.addEventListener("pointercancel", function (e) {
-      if (cbActive) cbPostUp("up", e.clientX, e.clientY);
-    }, true);
-    window.addEventListener("keydown", function (e) {
-      if (cbActive && (e.key === "Escape" || e.keyCode === 27)) {
-        try { window.parent.postMessage({ __cbFrame: true, kind: "escape" }, "*"); } catch (e5) {}
-      }
-    }, true);
-    function cbBlock(e) { if (cbActive) { e.preventDefault(); e.stopImmediatePropagation(); } }
-    window.addEventListener("mousedown", cbBlock, true);
-    window.addEventListener("click", cbBlock, true);
-    window.addEventListener("contextmenu", cbBlock, true);
-    return;
-  }
-
+  // The game runs only in the top frame. While it runs, embedded frames are
+  // made click-through (see the style sheet below) so aiming and firing also
+  // work over iframes.
+  if (window.top !== window) return;
   if (window.__cannonBlastActive) return;
   window.__cannonBlastActive = true;
-  console.log("%c[Cannon Blast v15]%c toggles beside cannon · no blast flash · smoother frames · double raids · taunting looters", "color:#ff6600;font-weight:bold","color:gray");
+
+  var VERSION = "";
+  try { VERSION = chrome.runtime.getManifest().version; } catch (e) {}
+  console.log("%c[BlastBlastBlast" + (VERSION ? " v" + VERSION : "") + "]%c move to aim · click to fire · Esc to remove",
+    "color:#ff6600;font-weight:bold", "color:gray");
 
   /* ── CONSTANTS ──────────────────────────────────────────────────────────── */
-  var GRAVITY      = 150;    // px/s² — particles only
-  var BALL_G       = 900;    // px/s² — ball arc curvature
-  var MAX_POWER    = 800;    // px/s (legacy, ring only)
-  var MAX_DRAG     = 180;    // px drag → full power (legacy)
-  var BLAST_RADIUS = 45;     // px — tight, focused blast
-  var BALL_R       = 15;     // px cannonball radius
-  var MIN_TRAVEL   = 100;    // px before collision can trigger (legacy)
-  var SHARD_G      = 95;     // px/s² gravity on flying chars
-  var MIN_AIM_DIST = 60;     // px — cursor must be at least this far to fire
+  var GRAVITY         = 150;   // px/s² — particles only
+  var BALL_G          = 900;   // px/s² — ball arc curvature
+  var BLAST_RADIUS    = 45;    // px — tight, focused blast
+  var BALL_R          = 15;    // px cannonball radius
+  var SHARD_G         = 95;    // px/s² gravity on flying debris
+  var MIN_AIM_DIST    = 60;    // px — cursor must be at least this far to fire
+  var MARK_TTL        = 60;    // s before a blast mark starts to fade
+  var MARK_FADE       = 10;    // s fade-out
+  var MAX_MARKS       = 160;   // older marks fade early beyond this
+  var MAX_DEBRIS      = 1400;  // canvas debris (chars + image pieces) alive at once
+  var MAX_FLUNG       = 60;    // DOM element clones in flight at once
+  var MAX_BLAST_CHARS = 180;   // characters one blast can tear out
+  var MAX_JOBS        = 8;     // queued page-destruction jobs
+  var HL_NAME         = "cb-blasted";
+  var HTML_NS         = "http://www.w3.org/1999/xhtml";
 
   /* ── STATE ──────────────────────────────────────────────────────────────── */
   var gameActive = true;
@@ -107,22 +53,36 @@
   var bullets    = [];        // straight-line gun bullets
   var bloodDrops = [];        // blood splatters that linger then fade
   var mode       = "cannon";  // "cannon" | "gun"
-  var mouseX     = window.innerWidth/2;
-  var mouseY     = window.innerHeight/2;
   var particles  = [];
   var shockwaves = [];
   var mFlashes   = [];
   var floaters   = [];        // floating score / taunt popups
   var craters    = [];
-  var shards     = [];        // flying chars / image pieces
-  var restoreList = [];       // {el, prop, value} — restored on destroy
-  var removeList  = [];       // DOM nodes we appended — removed on destroy
-  var aiming     = false;
+  var debris     = [];        // canvas-drawn flying characters + image pieces
+  var flung      = [];        // DOM clones in flight (whole elements, dropped loot)
+  var removeList = [];        // long-lived nodes we appended — removed on destroy
+  var hiddenList = [];        // page elements we hid with data-cb-hidden
+  var hiddenSet  = new WeakSet();
+  var scattered  = new WeakSet(); // elements flung whole
+  var shattered  = new WeakSet(); // images / videos / canvases shattered
+  var stolenSet  = new WeakSet(); // elements carried off by soldiers
   var aimAngle   = -Math.PI / 2.5;
+  var shownAngle = NaN;       // barrel angle currently rendered
   var aimPower   = 0;
-  var targetX    = 0;        // exact landing point = cursor position
+  var targetX    = 0;         // exact landing point = cursor position
   var targetY    = 0;
   var hasAim     = false;
+
+  // Layout values, refreshed once per frame in readPhase() (or on resize).
+  var viewW    = window.innerWidth;
+  var viewH    = window.innerHeight;
+  var dpr      = window.devicePixelRatio || 1;
+  var scrollX0 = window.scrollX;
+  var scrollY0 = window.scrollY;
+  var docW     = viewW;
+  var docH     = viewH;
+  var mouseX   = viewW / 2;
+  var mouseY   = viewH / 2;
 
   /* ── CONTINUOUS GUN FIRE ─────────────────────────────────────────────────────
      Holding the mouse down in gun mode auto-fires bullets at a steady rate
@@ -141,9 +101,8 @@
   var SOLDIER_KILL_R    = 78;    // blast radius that kills soldiers
 
   /* ── DANGER / ALERT MODE ────────────────────────────────────────────────────
-     After a stretch of continuous play a "danger mode" kicks in: a short
-     warning countdown, then a surge of soldiers swarming in from every
-     direction, then back to normal. Can also be forced on via a top toggle. */
+     Danger mode is a surge of soldiers swarming in from every direction. It is
+     toggled from the Danger button; the timed auto-trigger stays switched off. */
   var DANGER_AFTER_MIN  = 120;   // min sec of normal play before auto warning
   var DANGER_AFTER_MAX  = 180;   // max sec — each cycle picks randomly in [min,max]
   var AUTO_DANGER       = false; // auto-trigger disabled — danger only via the toggle
@@ -152,22 +111,48 @@
   var DANGER_MAX_SOLDIERS = 24;  // soldier cap during the surge
   var DANGER_INTERVAL   = 0.42;  // base seconds between spawn bursts during surge
   var dangerState       = "normal"; // "normal" | "warning" | "active"
-  var dangerTimer       = 0;     // counts down through warning / active phases
-  var playTime          = 0;     // seconds of continuous normal play
-  var dangerDelay       = 0;     // randomized 2–3 min wait for the current cycle
+  var dangerTimer       = 0;
+  var playTime          = 0;
+  var dangerDelay       = 0;
   var dangerForced      = false; // user toggle: keep the surge running
   function nextDangerDelay() { return DANGER_AFTER_MIN + Math.random()*(DANGER_AFTER_MAX - DANGER_AFTER_MIN); }
   dangerDelay = nextDangerDelay();
   var CAMO = ["#4a5d39","#556b2f","#5b6e3a","#46532f"];
   var PLAY_TOP_FRAC     = 0.72;  // soldiers only operate in the top 72% (cannon owns the bottom)
-  var clock             = 0;     // animation clock (seconds) for pulsing highlights
+  var clock             = 0;     // animation clock (seconds)
   var score             = 0;     // soldiers blasted this session
   var stolen            = 0;     // loot carried off
   var best              = 0;     // all-time high (chrome.storage)
 
+  /* ── STYLE SHEET (removed again on teardown) ─────────────────────────────── */
+  var styleEl = document.createElement("style");
+  styleEl.id = "__cb_styles";
+  styleEl.setAttribute("data-cb-ui", "1");
+  styleEl.textContent = [
+    "#__cannon_wrapper,#__cannon_wrapper *{box-sizing:border-box}",
+    // Blasted / stolen elements keep their layout box but stop painting.
+    "[data-cb-hidden]{visibility:hidden!important}",
+    // Embedded frames would swallow the pointer; let it reach the game instead.
+    "iframe,frame,embed,object{pointer-events:none!important}",
+    "::highlight(" + HL_NAME + "){color:transparent;-webkit-text-fill-color:transparent;text-shadow:none;text-decoration-color:transparent}",
+    // Toggle pulse: a ring that only animates transform/opacity (compositor-only).
+    ".__cb_toggle::before{content:'';position:absolute;inset:-2px;border-radius:16px;pointer-events:none;" +
+      "border:3px solid var(--cb-ring);opacity:0;will-change:transform,opacity;animation:var(--cb-ring-anim)}",
+    "@keyframes cbRing{0%{transform:scale(1);opacity:.9}60%,100%{transform:scale(1.09,1.16);opacity:0}}",
+    "@keyframes cbRingBig{0%{transform:scale(1);opacity:1}55%,100%{transform:scale(1.16,1.3);opacity:0}}",
+    "@keyframes cbVignette{0%,100%{opacity:.7}50%{opacity:1}}",
+    "@keyframes cbWiggle{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}",
+    "@keyframes cbMarkIn{from{transform:scale(.3);opacity:0}to{transform:scale(1);opacity:1}}",
+    ".__cb_mark{position:absolute;pointer-events:none;animation:cbMarkIn .2s ease-out}",
+    ".__cb_mark.__cb_fading{opacity:0;transition:opacity var(--cb-fade,10s) linear}"
+  ].join("\n");
+  document.documentElement.appendChild(styleEl);
+  removeList.push(styleEl);
+
   /* ── DOM SCAFFOLD ───────────────────────────────────────────────────────── */
   var wrapper = document.createElement("div");
   wrapper.id = "__cannon_wrapper";
+  wrapper.setAttribute("data-cb-ui", "1");
   wrapper.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;";
 
   var canvas = document.createElement("canvas");
@@ -177,11 +162,16 @@
   var tankRect = null;
   function refreshTankRect() { try { tankRect = tank.getBoundingClientRect(); } catch (e) {} }
   function resizeCanvas() {
-    var dpr = window.devicePixelRatio || 1;
-    canvas.width  = Math.floor(window.innerWidth  * dpr);
-    canvas.height = Math.floor(window.innerHeight * dpr);
+    viewW = window.innerWidth;
+    viewH = window.innerHeight;
+    var newDpr = window.devicePixelRatio || 1;
+    var dprChanged = newDpr !== dpr;
+    dpr = newDpr;
+    canvas.width  = Math.floor(viewW * dpr);
+    canvas.height = Math.floor(viewH * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     refreshTankRect();
+    if (dprChanged || !sprites.ball) buildSprites();
   }
 
   /* ── CANNON SVG TANK ────────────────────────────────────────────────────── */
@@ -244,28 +234,18 @@
   closeBtn.addEventListener("click", destroy);
   closeBtn.setAttribute("data-cb-ui", "1");
 
-  /* ── BUTTON ANIMATION STYLES ───────────────────────────────────────────── */
-  (function injectBtnStyles() {
-    var s = document.createElement("style");
-    s.id = "__cb_btn_styles";
-    s.setAttribute("data-cb-ui","1");
-    // Pulse animations only touch box-shadow — transform is free for smooth hover via JS
-    s.textContent = [
-      "@keyframes cbModePulse{0%,100%{box-shadow:0 4px 18px rgba(0,0,0,.5),0 0 0 0 rgba(255,210,74,.7)}60%{box-shadow:0 4px 18px rgba(0,0,0,.5),0 0 0 8px rgba(255,210,74,0)}}",
-      "@keyframes cbGunPulse{0%,100%{box-shadow:0 4px 18px rgba(0,0,0,.5),0 0 0 0 rgba(255,140,30,.8)}60%{box-shadow:0 4px 18px rgba(0,0,0,.5),0 0 0 9px rgba(255,140,30,0)}}",
-      "@keyframes cbDangerOff{0%,100%{box-shadow:0 4px 18px rgba(0,0,0,.5),0 0 0 0 rgba(255,107,74,.5)}60%{box-shadow:0 4px 18px rgba(0,0,0,.5),0 0 0 7px rgba(255,107,74,0)}}",
-      "@keyframes cbDangerOn{0%,100%{box-shadow:0 6px 28px rgba(200,20,10,.7),0 0 0 0 rgba(255,50,20,1)}55%{box-shadow:0 6px 28px rgba(200,20,10,.7),0 0 0 14px rgba(255,50,20,0)}}",
-    ].join("");
-    document.documentElement.appendChild(s);
-    removeList.push(s);
-  }());
+  // Pulse ring colour + animation for a toggle button (see .__cb_toggle::before).
+  function setRing(btn, color, anim) {
+    btn.style.setProperty("--cb-ring", color);
+    btn.style.setProperty("--cb-ring-anim", anim);
+  }
 
   /* ── WEAPON MODE TOGGLE (sits just left of the cannon) ──────────────────── */
   var modeBtn = document.createElement("button");
   modeBtn.id = "__cb_mode_btn";
+  modeBtn.className = "__cb_toggle";
   modeBtn.setAttribute("data-cb-ui", "1");
   modeBtn.style.cssText = [
-    // use right: so no transform needed for positioning — hover transform is clean
     "position:fixed;bottom:54px;right:calc(50% + 82px);",
     "background:rgba(14,16,11,0.96);color:#ffd24a;",
     "border:2px solid rgba(255,210,74,0.85);border-radius:16px;",
@@ -274,54 +254,61 @@
     "cursor:pointer;z-index:2147483647;pointer-events:all;",
     "display:flex;flex-direction:column;align-items:center;gap:3px;",
     "box-shadow:0 4px 18px rgba(0,0,0,.5);white-space:nowrap;",
-    "transition:transform .18s ease,filter .18s ease,border-color .2s,background .2s;",
-    "animation:cbModePulse 2s ease-in-out infinite;",
+    "transition:transform .18s ease,filter .18s ease,border-color .2s,background .2s;"
   ].join("");
 
   // Button always shows what you'll switch TO (not current state)
   function renderModeBtn() {
     if (mode === "cannon") {
-      // currently cannon → button offers Gun
       modeBtn.innerHTML =
         '<span style="font-size:28px;line-height:1.1">🔫</span>' +
         '<span style="font-size:13px;font-weight:800;letter-spacing:.5px">GUN MODE</span>' +
         '<span style="font-size:10px;opacity:.6;font-weight:600">tap to switch</span>';
-      modeBtn.style.animation = "cbModePulse 2s ease-in-out infinite";
       modeBtn.style.borderColor = "rgba(255,210,74,0.85)";
       modeBtn.style.color = "#ffd24a";
+      setRing(modeBtn, "rgba(255,210,74,0.7)", "cbRing 2s ease-out infinite");
     } else {
-      // currently gun → button offers Cannon
       modeBtn.innerHTML =
         '<span style="font-size:28px;line-height:1.1">💣</span>' +
         '<span style="font-size:13px;font-weight:800;letter-spacing:.5px">CANNON</span>' +
         '<span style="font-size:10px;opacity:.6;font-weight:600">tap to switch</span>';
-      modeBtn.style.animation = "cbGunPulse 1.4s ease-in-out infinite";
       modeBtn.style.borderColor = "rgba(255,140,30,0.9)";
       modeBtn.style.color = "#ff9a20";
+      setRing(modeBtn, "rgba(255,140,30,0.8)", "cbRing 1.4s ease-out infinite");
+    }
+  }
+
+  // Gun mode shows a crosshair cursor; remember the page's own inline cursor.
+  var htmlStyle = document.documentElement.style;
+  var origStyleAttr = document.documentElement.getAttribute("style");
+  var origCursor = htmlStyle.getPropertyValue("cursor");
+  var origCursorPrio = htmlStyle.getPropertyPriority("cursor");
+  function restoreCursor() {
+    if (origCursor) htmlStyle.setProperty("cursor", origCursor, origCursorPrio);
+    else htmlStyle.removeProperty("cursor");
+    if (origStyleAttr === null && document.documentElement.getAttribute("style") === "") {
+      document.documentElement.removeAttribute("style");
     }
   }
   function setMode(m) {
     mode = m;
     renderModeBtn();
-    aiming = false; hasAim = false; aimPower = 0;
-    document.documentElement.style.cursor = (mode === "gun") ? "crosshair" : "";
-    broadcastControl();
+    hasAim = false; aimPower = 0;
+    if (mode === "gun") htmlStyle.setProperty("cursor", "crosshair");
+    else restoreCursor();
   }
   modeBtn.addEventListener("click", function(e) {
     e.preventDefault(); e.stopPropagation();
     setMode(mode === "cannon" ? "gun" : "cannon");
   });
-  // Smooth hover via JS transform — doesn't conflict with box-shadow pulse animation
   modeBtn.addEventListener("mouseenter", function(){ modeBtn.style.transform = "translateY(-4px) scale(1.06)"; modeBtn.style.filter = "brightness(1.15)"; });
   modeBtn.addEventListener("mouseleave", function(){ modeBtn.style.transform = ""; modeBtn.style.filter = ""; });
   renderModeBtn();
 
-  function fadeUI(btn){ /* buttons always visible beside cannon */ }
-  fadeUI(modeBtn);
-
   /* ── DANGER MODE TOGGLE (sits just right of the cannon) ─────────────────── */
   var dangerBtn = document.createElement("button");
   dangerBtn.id = "__cb_danger_btn";
+  dangerBtn.className = "__cb_toggle";
   dangerBtn.setAttribute("data-cb-ui", "1");
   dangerBtn.style.cssText = [
     "position:fixed;bottom:54px;left:calc(50% + 82px);",
@@ -332,8 +319,7 @@
     "cursor:pointer;z-index:2147483647;pointer-events:all;",
     "display:flex;flex-direction:column;align-items:center;gap:3px;",
     "box-shadow:0 4px 18px rgba(0,0,0,.5);white-space:nowrap;",
-    "transition:transform .18s ease,filter .18s ease,background .2s,color .2s,border-color .2s;",
-    "animation:cbDangerOff 2.5s ease-in-out infinite;",
+    "transition:transform .18s ease,filter .18s ease,background .2s,color .2s,border-color .2s;"
   ].join("");
   dangerBtn.addEventListener("mouseenter", function(){ dangerBtn.style.transform = "translateY(-4px) scale(1.06)"; dangerBtn.style.filter = "brightness(1.15)"; });
   dangerBtn.addEventListener("mouseleave", function(){ dangerBtn.style.transform = ""; dangerBtn.style.filter = ""; });
@@ -346,7 +332,8 @@
       dangerBtn.style.background = "rgba(160,22,14,0.97)";
       dangerBtn.style.color = "#fff";
       dangerBtn.style.borderColor = "rgba(255,80,40,1)";
-      dangerBtn.style.animation = "cbDangerOn 0.9s ease-in-out infinite";
+      dangerBtn.style.boxShadow = "0 6px 28px rgba(200,20,10,.7)";
+      setRing(dangerBtn, "rgba(255,50,20,1)", "cbRingBig .9s ease-out infinite");
     } else {
       dangerBtn.innerHTML =
         '<span style="font-size:28px;line-height:1.1">⚠️</span>' +
@@ -355,28 +342,42 @@
       dangerBtn.style.background = "rgba(14,16,11,0.96)";
       dangerBtn.style.color = "#ff6b4a";
       dangerBtn.style.borderColor = "rgba(255,107,74,0.8)";
-      dangerBtn.style.animation = "cbDangerOff 2.5s ease-in-out infinite";
+      dangerBtn.style.boxShadow = "0 4px 18px rgba(0,0,0,.5)";
+      setRing(dangerBtn, "rgba(255,107,74,0.5)", "cbRing 2.5s ease-out infinite");
     }
   }
   dangerBtn.addEventListener("click", function(e) {
     e.preventDefault(); e.stopPropagation();
     dangerForced = !dangerForced;
-    if (dangerForced) {
-      enterDanger();                 // user-triggered surge starts now
-    } else {
-      exitDanger();                  // stop now; auto-mode waits the full DANGER_AFTER again
-    }
+    if (dangerForced) enterDanger();   // user-triggered surge starts now
+    else exitDanger();                 // stop now
     renderDangerBtn();
   });
   renderDangerBtn();
-  fadeUI(dangerBtn);
 
   /* ── ALERT BANNER + DANGER VIGNETTE (non-interactive overlays) ───────────── */
+  // The heavy inset shadow is painted once; only the opacity of the outer
+  // layer (transition) and of the inner layer (CSS animation) ever changes.
   var dangerVignette = document.createElement("div");
-  dangerVignette.style.cssText = [
-    "position:fixed;inset:0;pointer-events:none;z-index:2147483646;opacity:0;",
-    "transition:opacity .4s;box-shadow:inset 0 0 220px 60px rgba(200,20,10,0.55);"
-  ].join("");
+  dangerVignette.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483646;opacity:0;transition:opacity .4s;";
+  var vignetteInner = document.createElement("div");
+  vignetteInner.style.cssText = "position:absolute;inset:0;box-shadow:inset 0 0 220px 60px rgba(200,20,10,0.55);";
+  dangerVignette.appendChild(vignetteInner);
+  var vigMode = "", vigOffTimer = 0;
+  function setVignette(m) {
+    if (m === vigMode) return;
+    vigMode = m;
+    clearTimeout(vigOffTimer);
+    if (!m) {
+      dangerVignette.style.opacity = "0";
+      vigOffTimer = setTimeout(function () { if (!vigMode) vignetteInner.style.animation = ""; }, 450);
+      return;
+    }
+    // [outer opacity, pulse period] — matches the old |sin| pulses per state.
+    var cfg = m === "forced" ? ["1", ".79s"] : m === "active" ? [".9", ".63s"] : [".4", ".52s"];
+    vignetteInner.style.animation = "cbVignette " + cfg[1] + " ease-in-out infinite";
+    dangerVignette.style.opacity = cfg[0];
+  }
 
   var alertBanner = document.createElement("div");
   alertBanner.style.cssText = [
@@ -387,14 +388,24 @@
     "box-shadow:0 6px 26px rgba(180,20,10,0.6);text-align:center;white-space:nowrap;",
     "font-family:system-ui,sans-serif;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.6);"
   ].join("");
+  var bannerTitle = document.createElement("span");
+  bannerTitle.style.cssText = "font:800 17px/1.1 system-ui,sans-serif;letter-spacing:.5px";
+  var bannerSub = document.createElement("span");
+  bannerSub.style.cssText = "font:600 12px/1.2 system-ui,sans-serif;opacity:.9";
+  alertBanner.appendChild(bannerTitle);
+  alertBanner.appendChild(bannerSub);
 
+  // Text nodes are only touched when their content actually changes.
+  function setText(el, t) { if (el.__cbText !== t) { el.__cbText = t; el.textContent = t; } }
+  var bannerShown = false;
   function showAlertBanner(title, sub) {
-    alertBanner.innerHTML =
-      '<span style="font:800 17px/1.1 system-ui,sans-serif;letter-spacing:.5px">' + title + '</span>' +
-      '<span style="font:600 12px/1.2 system-ui,sans-serif;opacity:.9">' + sub + '</span>';
-    alertBanner.style.display = "flex";
+    setText(bannerTitle, title);
+    setText(bannerSub, sub);
+    if (!bannerShown) { bannerShown = true; alertBanner.style.display = "flex"; }
   }
-  function hideAlertBanner() { alertBanner.style.display = "none"; }
+  function hideAlertBanner() {
+    if (bannerShown) { bannerShown = false; alertBanner.style.display = "none"; }
+  }
 
   /* ── DANGER STATE MACHINE ───────────────────────────────────────────────── */
   function isDangerActive() { return dangerState === "active"; }
@@ -402,39 +413,38 @@
   function enterDanger() {
     dangerState = "active";
     dangerTimer = DANGER_DURATION;
-    dangerVignette.style.opacity = "1";
+    setVignette(dangerForced ? "forced" : "active");
     shakeScreen();
   }
   function exitDanger() {
     dangerState = "normal";
     playTime = 0;
     dangerTimer = 0;
-    dangerDelay = nextDangerDelay();   // pick a fresh 2–3 min wait for the next cycle
-    dangerVignette.style.opacity = "0";
+    dangerDelay = nextDangerDelay();
+    setVignette("");
     hideAlertBanner();
   }
   function updateDanger(dt) {
     if (dangerForced) {
       if (dangerState !== "active") enterDanger();
-      var n = soldiers.length;
-      showAlertBanner("🔥 DANGER SWARM", n + " hostiles incoming · blast them!");
-      dangerVignette.style.opacity = (0.7 + 0.3*Math.abs(Math.sin(clock*4))).toFixed(2);
+      showAlertBanner("🔥 DANGER SWARM", soldiers.length + " hostiles incoming · blast them!");
+      setVignette("forced");
       return;
     }
     if (dangerState === "normal") {
       playTime += dt;
-      dangerVignette.style.opacity = "0";
+      setVignette("");
       hideAlertBanner();
       if (AUTO_DANGER && playTime >= dangerDelay) { dangerState = "warning"; dangerTimer = DANGER_WARN; shakeScreen(); }
     } else if (dangerState === "warning") {
       dangerTimer -= dt;
       showAlertBanner("⚠️ DANGER MODE INCOMING", "brace for the swarm — " + Math.ceil(dangerTimer) + "s");
-      dangerVignette.style.opacity = (0.15 + 0.25*Math.abs(Math.sin(clock*6))).toFixed(2);
+      setVignette("warning");
       if (dangerTimer <= 0) enterDanger();
     } else if (dangerState === "active") {
       dangerTimer -= dt;
-      showAlertBanner("🔥 DANGER MODE — SURVIVE", "swarm clears in " + Math.ceil(Math.max(0,dangerTimer)) + "s");
-      dangerVignette.style.opacity = (0.55 + 0.35*Math.abs(Math.sin(clock*5))).toFixed(2);
+      showAlertBanner("🔥 DANGER MODE — SURVIVE", "swarm clears in " + Math.ceil(Math.max(0, dangerTimer)) + "s");
+      setVignette("active");
       if (dangerTimer <= 0) exitDanger();
     }
   }
@@ -460,53 +470,53 @@
     "box-shadow:0 4px 18px rgba(0,0,0,0.4);z-index:2147483647;",
     "white-space:nowrap;user-select:none;"
   ].join("");
+  function hudSpan(css) { var s = document.createElement("span"); s.style.cssText = css; hud.appendChild(s); return s; }
+  var hudScore = hudSpan("color:#ff6b4a");
+  hudSpan("opacity:.35").textContent = "|";
+  var hudBest = hudSpan("color:#ffd24a");
+  hudSpan("opacity:.35").textContent = "|";
+  var hudStolen = hudSpan("color:#9ab37a");
   wrapper.appendChild(hud);
 
   function renderHUD() {
-    hud.innerHTML =
-      '<span style="color:#ff6b4a">🎯 ' + score + '</span>' +
-      '<span style="opacity:.35">|</span>' +
-      '<span style="color:#ffd24a">🏆 ' + best + '</span>' +
-      '<span style="opacity:.35">|</span>' +
-      '<span style="color:#9ab37a">🪖 ' + stolen + '</span>';
+    setText(hudScore, "🎯 " + score);
+    setText(hudBest, "🏆 " + best);
+    setText(hudStolen, "🪖 " + stolen);
   }
 
+  // The best score is written at most once every 1.5s (and on exit) instead of
+  // on every kill.
+  var bestDirty = false, bestTimer = 0;
   function loadBest() {
     try {
-      if (chrome && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(["cbBest"], function(r){
-          if (r && typeof r.cbBest === "number") { best = r.cbBest; renderHUD(); }
-        });
-      }
+      chrome.storage.local.get(["cbBest"], function(r){
+        if (r && typeof r.cbBest === "number" && r.cbBest > best) { best = r.cbBest; renderHUD(); }
+      });
     } catch(e){}
   }
-  function saveBest() {
-    try {
-      if (chrome && chrome.storage && chrome.storage.local)
-        chrome.storage.local.set({ cbBest: best });
-    } catch(e){}
+  function flushBest() {
+    if (bestTimer) { clearTimeout(bestTimer); bestTimer = 0; }
+    if (!bestDirty) return;
+    bestDirty = false;
+    try { chrome.storage.local.set({ cbBest: best }); } catch(e){}
+  }
+  function saveBestSoon() {
+    bestDirty = true;
+    if (!bestTimer) bestTimer = setTimeout(flushBest, 1500);
   }
   function addScore(n) {
     score += n;
-    if (score > best) { best = score; saveBest(); }
+    if (score > best) { best = score; saveBestSoon(); }
     renderHUD();
   }
-
-  document.documentElement.appendChild(wrapper);
-  resizeCanvas();
-  renderHUD();
-  loadBest();
-  maybeShowIntro();
 
   /* ── FIRST-LAUNCH INTRO (shown only once, ever) ──────────────────────────── */
   function maybeShowIntro() {
     try {
-      if (chrome && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(["cbIntroSeen"], function(r){
-          if (!r || !r.cbIntroSeen) showIntro();
-        });
-      } else { showIntro(); }
-    } catch(e) { /* ignore */ }
+      chrome.storage.local.get(["cbIntroSeen"], function(r){
+        if (gameActive && (!r || !r.cbIntroSeen)) showIntro();
+      });
+    } catch(e) { showIntro(); }
   }
   function showIntro() {
     introActive = true;
@@ -518,12 +528,11 @@
       "background:rgba(0,0,0,0.62);backdrop-filter:blur(3px);font-family:system-ui,sans-serif;"
     ].join("");
     ov.innerHTML =
-      '<div style="position:fixed;bottom:120px;left:50%;transform:translateX(-50%);text-align:center;animation:cbWiggle 1s ease-in-out infinite">'+
+      '<div style="position:fixed;bottom:120px;left:50%;transform:translateX(-50%);text-align:center;">'+
+        '<div style="animation:cbWiggle 1s ease-in-out infinite">'+
         '<div style="background:#ffd24a;color:#111;font-weight:800;font-size:12px;padding:5px 10px;border-radius:9px;margin-bottom:4px">Switch 🔫 Gun &amp; ⚠️ Danger beside the cannon</div>'+
         '<div style="font-size:42px;line-height:1;color:#ffd24a;text-shadow:0 2px 8px rgba(0,0,0,.6)">↓</div>'+
-      '</div>'+
-      '<style>@keyframes cbWiggle{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}'+
-      '@keyframes cbGlow{0%,100%{box-shadow:0 0 0 0 rgba(255,210,74,.9),0 4px 14px rgba(0,0,0,.4)}50%{box-shadow:0 0 0 8px rgba(255,210,74,0),0 4px 14px rgba(0,0,0,.4)}}</style>'+
+      '</div></div>'+
       '<div style="background:#15171a;color:#eee;max-width:380px;width:86%;border-radius:16px;'+
       'padding:24px 26px;box-shadow:0 20px 60px rgba(0,0,0,0.6);border:1px solid rgba(255,210,74,0.3)">'+
       '<div style="font-size:19px;font-weight:800;color:#ffd24a;margin-bottom:6px">🔥 Welcome to BlastBlastBlast</div>'+
@@ -535,8 +544,6 @@
       'border-radius:10px;padding:11px;font-weight:800;font-size:14px;cursor:pointer">Let\u2019s blast! 🚀</button></div>';
     document.documentElement.appendChild(ov);
     removeList.push(ov);
-    // Pull the toggles to full opacity + blinking glow so the arrow lands on
-    // clearly visible buttons (they fade to .28 once the intro closes).
     function highlightToggles(on){
       [modeBtn, dangerBtn].forEach(function(b){
         b.style.opacity = "1";
@@ -553,21 +560,19 @@
 
   /* ── PIVOT / MUZZLE HELPERS ─────────────────────────────────────────────── */
   function getPivot() {
-    var r = tankRect || tank.getBoundingClientRect();
+    var r = tankRect || { left: viewW/2 - 70, top: viewH - 115, width: 140, height: 85 };
     return { x: r.left + (70/140)*r.width, y: r.top + (38/85)*r.height };
   }
   function getMuzzle() {
-    var p = getPivot(), r = tankRect || tank.getBoundingClientRect();
+    var p = getPivot(), r = tankRect || { width: 140 };
     var len = (62/140)*r.width;
     return { x: p.x + Math.cos(aimAngle)*len, y: p.y + Math.sin(aimAngle)*len };
   }
 
   /* ── AIMING ───────────────────────────────────────────────────────────────
-     Firing is click-anywhere (handled by onFirePointerDown); the barrel + arc
-     track the cursor every frame in applyAim(). The old drag-on-tank input was
-     removed — the tank is just UI now (data-cb-ui), so clicking it never fires. */
-  var dragStartX = 0, dragStartY = 0, dragMoved = false;
-  var MIN_DRAG_PX = 12; // legacy, unused
+     Firing is click-anywhere (onFirePointerDown); the barrel + arc track the
+     cursor every frame in applyAim(). The barrel SVG is only rewritten in the
+     write phase, and only when its angle actually changed. */
 
   /* Solve projectile launch from muzzle → target so it lands EXACTLY at target.
      Fixed flight time (scaled by distance) → guaranteed pass-through arc. */
@@ -580,28 +585,35 @@
     return { vx: vx, vy: vy, T: T, dist: dist };
   }
 
-  // Rotate the barrel to track the cursor even when NOT dragging
   function aimBarrelToward(mx, my) {
     var p = getPivot();
     var sol = solveLaunch(p.x, p.y, mx, my);
     aimAngle = Math.atan2(sol.vy, sol.vx);
-    barrelG.setAttribute("transform", "rotate(" + (aimAngle * 180 / Math.PI) + " 70 38)");
   }
 
   // CANNON: aim the arc at an arbitrary point (cursor) — drives the live
   // trajectory preview so the user can click anywhere on the page to blast.
   function updateCannonAimTo(mx, my) {
-    targetX = Math.max(6, Math.min(window.innerWidth  - 6, mx));
-    targetY = Math.max(6, Math.min(window.innerHeight - 6, my));
+    targetX = Math.max(6, Math.min(viewW - 6, mx));
+    targetY = Math.max(6, Math.min(viewH - 6, my));
     var p = getPivot();
     var sol = solveLaunch(p.x, p.y, targetX, targetY);
     aimAngle = Math.atan2(sol.vy, sol.vx);
-    aimPower = Math.min(sol.dist / Math.hypot(window.innerWidth, window.innerHeight), 1);
+    aimPower = Math.min(sol.dist / Math.hypot(viewW, viewH), 1);
     hasAim = sol.dist >= MIN_AIM_DIST;
-    barrelG.setAttribute("transform", "rotate(" + (aimAngle * 180 / Math.PI) + " 70 38)");
   }
 
-  // Unified "fire toward this point" used by both local clicks and iframe-forwarded clicks.
+  function writeBarrel() {
+    if (Math.abs(aimAngle - shownAngle) < 0.002) return;
+    shownAngle = aimAngle;
+    barrelG.setAttribute("transform", "rotate(" + (aimAngle * 180 / Math.PI).toFixed(2) + " 70 38)");
+  }
+
+  function applyAim() {
+    if (mode === "cannon") updateCannonAimTo(mouseX, mouseY);
+    else                   aimBarrelToward(mouseX, mouseY);
+  }
+
   function fireAt(x, y) {
     if (mode === "gun") {
       fireGun(x, y);
@@ -615,6 +627,7 @@
   // keep streaming (updateGunAutoFire) until the pointer is released.
   function beginFire(x, y) {
     if (introActive) return;          // wait until the intro is dismissed
+    mouseX = x; mouseY = y;
     fireAt(x, y);
     if (mode === "gun") { gunHeld = true; gunFireCd = GUN_FIRE_INTERVAL; }
   }
@@ -687,8 +700,7 @@
       for (var j = 0; j < soldiers.length; j++) {
         var s = soldiers[j];
         if (s.state === "dead") continue;
-        var bx = s.x, by = s.y - 20;       // soldier body center
-        if (segDist(bx, by, b.px, b.py, b.x, b.y) < 15) {
+        if (segDist(s.x, s.y - 20, b.px, b.py, b.x, b.y) < 15) {
           killSoldier(s);
           hit = true;
           break;
@@ -705,7 +717,7 @@
         bullets.splice(i, 1);
         continue;
       }
-      if (b.life <= 0 || b.x < -40 || b.x > window.innerWidth+40 || b.y < -40 || b.y > window.innerHeight+40) {
+      if (b.life <= 0 || b.x < -40 || b.x > viewW+40 || b.y < -40 || b.y > viewH+40) {
         bullets.splice(i, 1);
       }
     }
@@ -748,47 +760,45 @@
       var d = bloodDrops[i];
       var alpha = 1;
       if (d.settled && d.age > d.hold) alpha = Math.max(0, 1 - (d.age - d.hold)/d.fade);
-      ctx.save();
       ctx.globalAlpha = alpha * 0.92;
       ctx.fillStyle = d.hue;
       ctx.beginPath();
-      if (d.settled) {
-        // settled splat: a flattened pool
-        ctx.ellipse(d.x, d.y, d.r*1.4, d.r*0.85, 0, 0, Math.PI*2);
-      } else {
-        ctx.arc(d.x, d.y, d.r, 0, Math.PI*2);
-      }
+      if (d.settled) ctx.ellipse(d.x, d.y, d.r*1.4, d.r*0.85, 0, 0, Math.PI*2);
+      else           ctx.arc(d.x, d.y, d.r, 0, Math.PI*2);
       ctx.fill();
-      ctx.restore();
     }
+    ctx.globalAlpha = 1;
   }
 
   function renderBullets() {
+    if (!bullets.length) return;
+    ctx.save();
+    ctx.lineCap = "round";
     for (var i = 0; i < bullets.length; i++) {
       var b = bullets[i];
       var tx = b.x - b.vx*0.016, ty = b.y - b.vy*0.016;  // tracer tail
-      ctx.save();
-      ctx.lineCap = "round";
       // dark outline so the tracer reads on bright backgrounds
       ctx.strokeStyle = "rgba(20,12,0,0.85)";
       ctx.lineWidth = 5.2;
       ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(b.x, b.y); ctx.stroke();
+      // soft glow halo (a wide translucent stroke instead of a per-frame shadowBlur)
+      ctx.strokeStyle = "rgba(255,170,40,0.3)";
+      ctx.lineWidth = 9;
+      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(b.x, b.y); ctx.stroke();
       // glowing core
-      ctx.shadowColor = "rgba(255,180,40,1)"; ctx.shadowBlur = 8;
       ctx.strokeStyle = "rgba(255,150,30,0.95)";
       ctx.lineWidth = 3.2;
       ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(b.x, b.y); ctx.stroke();
       ctx.strokeStyle = "#fff6d8";
       ctx.lineWidth = 1.4;
       ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(b.x, b.y); ctx.stroke();
-      ctx.shadowBlur = 0;
       // bright head with dark ring
       ctx.fillStyle = "#fff8e0";
       ctx.beginPath(); ctx.arc(b.x, b.y, 2.6, 0, Math.PI*2); ctx.fill();
       ctx.strokeStyle = "rgba(20,12,0,0.85)"; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.arc(b.x, b.y, 3.1, 0, Math.PI*2); ctx.stroke();
-      ctx.restore();
     }
+    ctx.restore();
   }
 
   // Crosshair reticle drawn at the cursor while in gun mode.
@@ -834,31 +844,13 @@
     }
   }
 
-  /* ── ELEMENT UNDER POINT ─────────────────────────────────────────────────── */
-  function elementUnder(x, y) {
-    var prev = wrapper.style.display;
-    wrapper.style.display = "none";
-    var el = document.elementFromPoint(x, y);
-    wrapper.style.display = prev;
-    if (!el || el === document.body || el === document.documentElement) return null;
-    if (el.closest && el.closest("#__cannon_wrapper")) return null;
-    // Skip full-viewport overlays
-    try {
-      var cs = getComputedStyle(el);
-      if (cs.position === "fixed" || cs.position === "absolute") {
-        var r = el.getBoundingClientRect();
-        if (r.width > window.innerWidth*0.85 && r.height > window.innerHeight*0.85) return null;
-      }
-    } catch(e2) {}
-    return el;
-  }
-
-  /* ── EXPLOSION ───────────────────────────────────────────────────────────── */
-  // Heavy DOM destruction (scatter/shatter) is throttled to one blast per frame
-  // via scatterQueue + processScatterQueue() in the game loop. This keeps rapid
-  // clicking / many simultaneous landings in danger mode from piling multiple
-  // synchronous DOM-scatter passes into a single frame (the millisecond freezes).
-  var scatterQueue = [];
+  /* ── EXPLOSION ───────────────────────────────────────────────────────────────
+     Visuals happen immediately on the canvas. Destroying page content is a
+     "job": readBlast() does every layout read for it at the start of the next
+     frame, then applyBlast() does the DOM writes. Reads never follow writes
+     within a frame, so a blast costs at most one layout, not one per node. */
+  var blastQueue = [];
+  var blastResults = [];
   function explodeAt(cx, cy) {
     spawnExplosionParticles(cx, cy);
     createBlastMark(cx, cy);
@@ -868,19 +860,7 @@
       var sol = soldiers[si];
       if (Math.hypot(sol.x - cx, (sol.y-18) - cy) < SOLDIER_KILL_R) killSoldier(sol);
     }
-    if (scatterQueue.length < 10) scatterQueue.push({ cx: cx, cy: cy });
-  }
-
-  function processScatterQueue() {
-    if (!scatterQueue.length) return;
-    // Spread the three heavy DOM passes of one blast across three frames —
-    // a single frame never pays for scatter + shatter + text all at once,
-    // which is what caused the millisecond freezes right after a blast.
-    var b = scatterQueue[0];
-    b.step = (b.step || 0) + 1;
-    if      (b.step === 1) scatterElementsNearPoint(b.cx, b.cy); // buttons, icons, svg, bg-images
-    else if (b.step === 2) shatterImagesNear(b.cx, b.cy);        // <img> → fragments
-    else { scatterTextNearPoint(b.cx, b.cy); scatterQueue.shift(); } // text → chars, done
+    if (blastQueue.length < MAX_JOBS) blastQueue.push({ cx: cx, cy: cy });
   }
 
   function spawnExplosionParticles(cx, cy) {
@@ -897,422 +877,680 @@
     }
     shockwaves.push({x:cx,y:cy,r:0,maxR:42, life:0.22,maxLife:0.22,w:2.5,color:"255,185,90"});
     shockwaves.push({x:cx,y:cy,r:0,maxR:26, life:0.13,maxLife:0.13,w:1.5,color:"255,255,255"});
-    // (full-screen white flash removed — it caused a jarring strobe on every blast)
     craters.push({ x:cx, y:cy, r:14+Math.random()*5, life:1.0, maxLife:1.0 });
   }
 
-  /* ── PERMANENT BLAST MARK ────────────────────────────────────────────────── */
-  var BLAST_MARK_TTL = 60000;  // ms before each blast mark fades away (≈1 min)
-  var markTimers = [];
-  function createBlastMark(cx, cy) {
-    var R  = 22 + Math.random()*8;
-    var sz = R*2 + 30;
-    var hf = sz/2;
+  function distToRect(cx, cy, r) {
+    var nx = Math.max(r.left, Math.min(cx, r.right));
+    var ny = Math.max(r.top,  Math.min(cy, r.bottom));
+    return Math.hypot(nx - cx, ny - cy);
+  }
 
-    var cracks = "", debris = "", embers = "";
-    var nc = 6 + Math.floor(Math.random()*4);
-    for (var i = 0; i < nc; i++) {
-      var baseA = (i/nc)*Math.PI*2 + (Math.random()-0.5)*0.55;
-      var len   = R*(0.8 + Math.random()*0.8);
-      var x = hf, y = hf;
-      var pts = "M"+x.toFixed(1)+","+y.toFixed(1);
-      var segs = 2 + Math.floor(Math.random()*2);
-      for (var s = 0; s < segs; s++) {
-        var sa = baseA + (Math.random()-0.5)*0.28;
-        var sl = (len/segs)*(0.65+Math.random()*0.5);
-        x += Math.cos(sa)*sl; y += Math.sin(sa)*sl;
-        pts += " L"+x.toFixed(1)+","+y.toFixed(1);
-        if (Math.random() > 0.5) {
-          var bx = x+Math.cos(sa+0.85)*sl*0.28, by = y+Math.sin(sa+0.85)*sl*0.28;
-          cracks += '<path d="M'+x.toFixed(1)+','+y.toFixed(1)+' L'+bx.toFixed(1)+','+by.toFixed(1)+'" stroke="#080808" stroke-width="0.9" opacity="0.6"/>';
+  // Hit-test sample points: centre, ring at R/2, ring at R (unit circle).
+  var SAMPLES = [[0, 0]];
+  (function () {
+    var rings = [0.5, 1];
+    for (var rd = 0; rd < rings.length; rd++)
+      for (var a = 0; a < 8; a++)
+        SAMPLES.push([Math.cos(a / 8 * Math.PI * 2) * rings[rd], Math.sin(a / 8 * Math.PI * 2) * rings[rd]]);
+  }());
+
+  /* READ phase of one blast: gathers everything it will destroy. */
+  function readBlast(job) {
+    var cx = job.cx, cy = job.cy, R = BLAST_RADIUS;
+    var res = { cx: cx, cy: cy, atoms: [], media: [], chars: [] };
+    var seen = new Set(), atomSeen = new Set(), mediaSeen = new Set();
+
+    // 1) Whole UI atoms (buttons, icons, svg, bg-images) and videos/canvases.
+    for (var s = 0; s < SAMPLES.length; s++) {
+      var sx = cx + SAMPLES[s][0] * R, sy = cy + SAMPLES[s][1] * R;
+      if (sx < 0 || sy < 0 || sx >= viewW || sy >= viewH) continue;
+      var stack = document.elementsFromPoint(sx, sy) || [];
+      for (var k = 0; k < stack.length && k < 4; k++) {
+        var el = stack[k];
+        if (!el || seen.has(el)) continue;
+        seen.add(el);
+        var atom = atomToFling(el, cx, cy);
+        if (!atom) continue;
+        if (atom.media) {
+          if (!mediaSeen.has(atom.el)) { mediaSeen.add(atom.el); res.media.push(atom); }
+        } else if (!atomSeen.has(atom.el) && res.atoms.length < 16) {
+          atomSeen.add(atom.el); res.atoms.push(atom);
         }
       }
-      cracks += '<path d="'+pts+'" stroke="#070707" stroke-width="'+(1+Math.random()*1.1).toFixed(1)+'" stroke-linecap="round" fill="none" opacity="0.88"/>';
-    }
-    for (var d = 0; d < 16; d++) {
-      var da = Math.random()*Math.PI*2, dr = R*(0.5+Math.random()*0.75);
-      var gr = Math.floor(15+Math.random()*45);
-      debris += '<circle cx="'+(hf+Math.cos(da)*dr).toFixed(1)+'" cy="'+(hf+Math.sin(da)*dr).toFixed(1)+'" r="'+(0.8+Math.random()*2.2).toFixed(1)+'" fill="rgb('+gr+','+gr+','+gr+')" opacity="'+(0.45+Math.random()*0.5).toFixed(2)+'"/>';
-    }
-    for (var e = 0; e < 5; e++) {
-      var ea = Math.random()*Math.PI*2, er = R*(0.4+Math.random()*0.55);
-      embers += '<circle cx="'+(hf+Math.cos(ea)*er).toFixed(1)+'" cy="'+(hf+Math.sin(ea)*er).toFixed(1)+'" r="'+(2+Math.random()*3).toFixed(1)+'" fill="#ff4400" opacity="'+(0.3+Math.random()*0.45).toFixed(2)+'" filter="url(#__cbGlow)"/>';
     }
 
-    var uid  = "__cbm"+Date.now()+"_"+Math.floor(Math.random()*9999);
-    var seed = Math.floor(Math.random()*99);
-    var svg  = [
-      '<svg width="'+sz+'" height="'+sz+'" viewBox="0 0 '+sz+' '+sz+'" xmlns="http://www.w3.org/2000/svg" style="overflow:visible">',
-      '<defs>',
-      '<radialGradient id="'+uid+'h" cx="50%" cy="50%" r="50%">',
-      '<stop offset="0%" stop-color="#000000" stop-opacity="0.97"/>',
-      '<stop offset="42%" stop-color="#0d0400" stop-opacity="0.86"/>',
-      '<stop offset="74%" stop-color="#1a0800" stop-opacity="0.58"/>',
-      '<stop offset="100%" stop-color="#000000" stop-opacity="0"/>',
-      '</radialGradient>',
-      '<radialGradient id="'+uid+'e" cx="50%" cy="50%" r="50%">',
-      '<stop offset="0%" stop-color="#ff6600" stop-opacity="0.65"/>',
-      '<stop offset="55%" stop-color="#ff2200" stop-opacity="0.22"/>',
-      '<stop offset="100%" stop-color="#ff0000" stop-opacity="0"/>',
-      '</radialGradient>',
-      '<filter id="__cbGlow" x="-100%" y="-100%" width="300%" height="300%">',
-      '<feGaussianBlur stdDeviation="2.5" result="b"/>',
-      '<feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>',
-      '</filter>',
-      '</defs>',
-      '<circle cx="'+hf+'" cy="'+hf+'" r="'+(R*1.1).toFixed(1)+'" fill="none" stroke="#200a00" stroke-width="9" opacity="0.55"/>',
-      '<circle cx="'+hf+'" cy="'+hf+'" r="'+(R*0.9).toFixed(1)+'" fill="url(#'+uid+'e)" filter="url(#__cbGlow)"/>',
-      '<circle cx="'+hf+'" cy="'+hf+'" r="'+R.toFixed(1)+'" fill="url(#'+uid+'h)"/>',
-      cracks, debris, embers,
-      '</svg>'
-    ].join("");
-
-    var mark = document.createElement("div");
-    mark.style.cssText = [
-      "position:fixed;",
-      "left:"+(cx-hf)+"px;top:"+(cy-hf)+"px;",
-      "width:"+sz+"px;height:"+sz+"px;",
-      "pointer-events:none;z-index:2147483644;",
-      "transform:scale(0);opacity:1;",
-      "transition:transform 0.2s cubic-bezier(0.15,1.5,0.4,1), opacity 10s linear;"
-    ].join("");
-    mark.innerHTML = svg;
-    document.documentElement.appendChild(mark);
-    removeList.push(mark);   // safety net: also removed when cannon is destroyed
-    requestAnimationFrame(function() { mark.style.transform = "scale(1)"; });
-    // After ~60s the mark slowly fades over 10s, then is removed — clearing the
-    // area so the user can see what's underneath again.
-    var fadeT = setTimeout(function(){ mark.style.opacity = "0"; }, BLAST_MARK_TTL);
-    var killT = setTimeout(function(){ if (mark.parentNode) mark.parentNode.removeChild(mark); }, BLAST_MARK_TTL + 10000);
-    markTimers.push(fadeT); markTimers.push(killT);
-  }
-
-  /* ── ELEMENT SCATTERING — fling whole UI atoms (buttons, icons, svg, bg-images) ── */
-  function scatterElementsNearPoint(cx, cy) {
-    // Sample points across the blast circle and collect whatever is actually there
-    var samples = [[0, 0]];
-    var ringDefs = [BLAST_RADIUS * 0.5, BLAST_RADIUS];
-    for (var rd = 0; rd < ringDefs.length; rd++) {
-      var rr = ringDefs[rd];
-      for (var a = 0; a < 8; a++) {
-        var ang = (a / 8) * Math.PI * 2;
-        samples.push([Math.cos(ang) * rr, Math.sin(ang) * rr]);
+    // 2) Images within reach of the blast.
+    var imgs = document.images;
+    for (var i = 0; i < imgs.length && res.media.length < 8; i++) {
+      var img = imgs[i];
+      if (shattered.has(img) || hiddenSet.has(img) || mediaSeen.has(img)) continue;
+      var r = img.getBoundingClientRect();
+      if (r.width < 4 || r.height < 4) continue;
+      if (r.bottom < 0 || r.top > viewH || r.right < 0 || r.left > viewW) continue;
+      if (distToRect(cx, cy, r) > R) continue;
+      var ics = getComputedStyle(img);
+      if (ics.visibility === "hidden") continue;
+      mediaSeen.add(img);
+      res.media.push({ media: true, el: img, rect: r, cs: ics });
+    }
+    // Atoms that contain a shattered image are flung whole instead.
+    for (var m = res.media.length - 1; m >= 0; m--) {
+      for (var a2 = 0; a2 < res.atoms.length; a2++) {
+        if (res.atoms[a2].el.contains(res.media[m].el)) { res.media.splice(m, 1); break; }
       }
     }
-    // Our overlay (wrapper + canvas) is pointer-events:none, so elementsFromPoint
-    // already skips it — no need to toggle display (which forced a full reflow).
-    var seen = [], candidates = [];
-    for (var s = 0; s < samples.length; s++) {
-      var sxp = cx + samples[s][0], syp = cy + samples[s][1];
-      if (sxp < 0 || syp < 0 || sxp > window.innerWidth || syp > window.innerHeight) continue;
-      var stack = document.elementsFromPoint(sxp, syp) || [];
-      for (var k = 0; k < stack.length && k < 4; k++) { // only top few layers
-        var el = stack[k];
-        if (!el || seen.indexOf(el) !== -1) continue;
-        seen.push(el);
-        var atom = atomToFling(el, cx, cy);
-        if (atom) candidates.push(atom);
-      }
-    }
-    // All geometry was read above; now do the DOM writes in one batch (visibility:hidden
-    // + position:fixed clones don't move other elements, so cached rects stay valid).
-    for (var c = 0; c < candidates.length && c < 24; c++) flingElement(candidates[c].el, cx, cy, candidates[c].rect);
+
+    // 3) Characters under the blast (text inside flung atoms goes with them).
+    res.chars = collectBlastChars(cx, cy, R, res.atoms);
+    return res;
   }
 
+  /* WRITE phase of one blast. */
+  function applyBlast(res) {
+    var a, m;
+    for (a = 0; a < res.atoms.length; a++) flingElement(res.atoms[a].el, res.cx, res.cy, res.atoms[a].rect);
+    for (m = 0; m < res.media.length; m++) shatterMedia(res.media[m], res.cx, res.cy);
+    if (res.chars.length) blastChars(res.chars, res.cx, res.cy);
+  }
+
+  var SKIP_ATOM = { html:1, body:1, head:1, script:1, style:1, main:1, section:1, article:1, nav:1, ul:1, ol:1 };
   function atomToFling(el, cx, cy) {
     if (!el || el.nodeType !== 1) return null;
     // Climb out of SVG internals to the <svg> root
-    if (el.ownerSVGElement) { el = el.ownerSVGElement; }
-    var tag = el.tagName;
-    if (["HTML","BODY","SCRIPT","STYLE","HEAD","MAIN","SECTION","ARTICLE","NAV","UL","OL"].indexOf(tag) !== -1) return null;
-    if (el.closest && el.closest("#__cannon_wrapper")) return null;
-    if (el.dataset && (el.dataset.cbScattered || el.dataset.cbDone)) return null;
+    if (el.ownerSVGElement) el = el.ownerSVGElement;
+    var tag = el.localName;
+    if (SKIP_ATOM[tag]) return null;
+    if (el.closest("[data-cb-ui]")) return null;
+    if (scattered.has(el) || shattered.has(el) || hiddenSet.has(el)) return null;
     var rect = el.getBoundingClientRect();
     if (rect.width < 5 || rect.height < 5) return null;
     if (rect.width > 240 || rect.height > 180) return null;        // skip big containers
-    var nx = Math.max(rect.left, Math.min(cx, rect.right));
-    var ny = Math.max(rect.top,  Math.min(cy, rect.bottom));
-    if (Math.hypot(nx - cx, ny - cy) > BLAST_RADIUS) return null;   // not actually in blast
-    if (tag === "IMG") return null;                                // handled by shatter
+    if (distToRect(cx, cy, rect) > BLAST_RADIUS) return null;      // not actually in blast
+    if (tag === "img") return null;                                // handled by the image pass
+    if (tag === "video" || tag === "canvas") {
+      return { media: true, el: el, rect: rect, cs: getComputedStyle(el) };
+    }
     // Decide if this is a "visual atom" worth flinging whole
-    var isGraphic = (tag==="SVG"||tag==="BUTTON"||tag==="INPUT"||tag==="SELECT"||
-                     tag==="VIDEO"||tag==="CANVAS"||tag==="LABEL");
-    var bg = "none";
-    try { bg = getComputedStyle(el).backgroundImage; } catch(e) {}
+    var isGraphic = tag === "svg" || tag === "button" || tag === "input" || tag === "select" || tag === "label";
+    var cs = getComputedStyle(el);
+    var bg = cs.backgroundImage;
     var hasBg = bg && bg !== "none";
-    var role = el.getAttribute && el.getAttribute("role");
+    var role = el.getAttribute("role");
     var roleBtn = role === "button" || role === "img";
-    var cls = (typeof el.className === "string") ? el.className : "";
+    var cls = el.getAttribute("class") || "";
     var iconish = /icon|btn|button|logo|avatar|badge|chip|pill|tag\b/i.test(cls);
     if (isGraphic || hasBg || roleBtn || iconish) return { el: el, rect: rect };
     return null;
   }
 
-  function flingElement(el, cx, cy, rect) {
-    if (el.dataset && (el.dataset.cbScattered || el.dataset.cbDone)) return;
-    rect = rect || el.getBoundingClientRect();
-    if (rect.width < 5 || rect.height < 5) return;
-    if (el.dataset) el.dataset.cbScattered = "1";
-    restoreList.push({ el: el, prop: "visibility", value: el.style.visibility });
+  function hideEl(el) {
+    if (hiddenSet.has(el)) return;
+    hiddenSet.add(el);
+    hiddenList.push(el);
+    el.setAttribute("data-cb-hidden", "");
+  }
+  function removeNode(n) { if (n && n.parentNode) n.parentNode.removeChild(n); }
 
+  // A detached copy of a page element that can fly around (position:fixed,
+  // moved only with compositor-friendly transforms).
+  function cloneForFlight(el, left, top, w, h) {
     var clone = el.cloneNode(true);
     clone.removeAttribute("id");
-    clone.style.position   = "fixed";
-    clone.style.left       = rect.left + "px";
-    clone.style.top        = rect.top  + "px";
-    clone.style.width      = rect.width  + "px";
-    clone.style.height     = rect.height + "px";
-    clone.style.margin     = "0";
-    clone.style.transform  = "none";
-    clone.style.transition = "none";
-    clone.style.pointerEvents = "none";
-    clone.style.zIndex     = "2147483646";
+    clone.removeAttribute("data-cb-hidden");
+    var ids = clone.querySelectorAll("[id]");
+    for (var i = 0; i < ids.length; i++) ids[i].removeAttribute("id");
+    var cs = clone.style;
+    cs.position = "fixed";
+    cs.left = left + "px"; cs.top = top + "px";
+    cs.width = w + "px"; cs.height = h + "px";
+    cs.boxSizing = "border-box";
+    cs.margin = "0";
+    cs.transform = "none";
+    cs.transition = "none";
+    cs.pointerEvents = "none";
+    cs.zIndex = "2147483646";
+    cs.willChange = "transform";
+    clone.setAttribute("data-cb-ui", "1");
+    var ranges = copyHighlights(el, clone);
     document.documentElement.appendChild(clone);
-    removeList.push(clone);
-    el.style.visibility = "hidden";
+    return { el: clone, ranges: ranges };
+  }
 
+  /* ── ELEMENT SCATTERING — fling whole UI atoms ───────────────────────────── */
+  function flingElement(el, cx, cy, rect) {
+    if (scattered.has(el) || hiddenSet.has(el)) return;
+    scattered.add(el);
+    if (flung.length >= MAX_FLUNG) { hideEl(el); return; }   // too much already in the air
+    var c = cloneForFlight(el, rect.left, rect.top, rect.width, rect.height);
+    hideEl(el);
     var ecx = rect.left + rect.width/2, ecy = rect.top + rect.height/2;
     var ang = Math.atan2(ecy - cy, ecx - cx);
     var dist = Math.hypot(ecx - cx, ecy - cy);
     var force = (1 - Math.min(dist / BLAST_RADIUS, 1)) * 480 + 150 + Math.random()*120;
-    shards.push({
-      el: clone, x: ecx, y: ecy, ox: ecx, oy: ecy,
+    flung.push({
+      el: c.el, ranges: c.ranges, x: ecx, y: ecy, ox: ecx, oy: ecy,
       vx: Math.cos(ang) * force + (Math.random()-0.5)*150,
       vy: Math.sin(ang) * force - 200 - Math.random()*170,
       rotation: 0, rotSpeed: (Math.random()-0.5)*420,
-      life: 1.3 + Math.random()*0.9, fade: 0.4
+      life: 1.3 + Math.random()*0.9, fade: 0.4, fading: false
     });
   }
 
-  /* ── TEXT SCATTERING — Range API gives exact pixel position of every character ── */
-  var TEXT_SKIP_TAGS = ["HTML","BODY","MAIN","SECTION","ARTICLE","NAV","HEADER","FOOTER",
-                        "ASIDE","SCRIPT","STYLE","NOSCRIPT","TEXTAREA"];
-  function scatterTextNearPoint(cx, cy) {
-    // Only scan text inside elements actually under the blast — walking the whole
-    // document's text nodes on every shot is what made blasting stutter.
-    var samples = [[0, 0]];
-    var rings = [BLAST_RADIUS * 0.5, BLAST_RADIUS, BLAST_RADIUS + 28];
-    for (var rd = 0; rd < rings.length; rd++) {
-      for (var a = 0; a < 8; a++) {
-        var ang = (a / 8) * Math.PI * 2;
-        samples.push([Math.cos(ang) * rings[rd], Math.sin(ang) * rings[rd]]);
+  function updateFlung(dt) {
+    for (var i = flung.length-1; i >= 0; i--) {
+      var s = flung[i];
+      s.vy += SHARD_G * dt;
+      s.vx *= 0.997;
+      s.x  += s.vx * dt;
+      s.y  += s.vy * dt;
+      s.rotation += s.rotSpeed * dt;
+      s.life -= dt;
+      if (s.life <= 0) {
+        removeNode(s.el);
+        dropRanges(s.ranges);
+        flung.splice(i, 1);
+        continue;
       }
-    }
-    // Overlay is pointer-events:none, so elementsFromPoint already skips it.
-    var roots = [];
-    for (var s = 0; s < samples.length; s++) {
-      var sxp = cx + samples[s][0], syp = cy + samples[s][1];
-      if (sxp < 0 || syp < 0 || sxp > window.innerWidth || syp > window.innerHeight) continue;
-      var stack = document.elementsFromPoint(sxp, syp) || [];
-      for (var k = 0; k < stack.length && k < 4; k++) {
-        var el = stack[k];
-        if (!el || el.nodeType !== 1) continue;
-        if (el.closest && el.closest("#__cannon_wrapper")) continue;
-        if (TEXT_SKIP_TAGS.indexOf(el.tagName) !== -1) continue;
-        if (roots.indexOf(el) === -1) roots.push(el);
+      s.el.style.transform = "translate3d(" + (s.x-s.ox).toFixed(1) + "px," + (s.y-s.oy).toFixed(1) + "px,0) rotate(" + s.rotation.toFixed(1) + "deg)";
+      if (!s.fading && s.life <= s.fade) {
+        s.fading = true;
+        s.el.style.transition = "opacity 0.3s";
+        s.el.style.opacity = "0";
       }
-    }
-
-    var nodes = [], seen = [];
-    for (var ri = 0; ri < roots.length && nodes.length < 240; ri++) {
-      var root = roots[ri];
-      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
-      var node;
-      while ((node = walker.nextNode())) {
-        var par = node.parentElement;
-        if (!par || par.closest("#__cannon_wrapper")) continue;
-        if (["SCRIPT","STYLE","NOSCRIPT","TEXTAREA"].indexOf(par.tagName) !== -1) continue;
-        if (!(node.textContent || "").trim()) continue;
-        if (seen.indexOf(node) !== -1) continue;
-        seen.push(node); nodes.push(node);
-        if (nodes.length >= 240) break;
-      }
-    }
-    for (var ni = 0; ni < nodes.length; ni++) {
-      processTextNode(nodes[ni], cx, cy);
     }
   }
 
-  function processTextNode(textNode, cx, cy) {
-    var text = textNode.textContent;
-    if (!text.trim()) return;
+  /* ── TEXT BLASTING ───────────────────────────────────────────────────────────
+     Characters inside the blast are found with caret hit-tests along a few
+     scanlines, measured with a Range (reads only), then hidden by adding
+     StaticRanges to a CSS Custom Highlight whose style makes them transparent.
+     Text nodes are never split or replaced: no reflow, no layout shift, and
+     framework-owned nodes (React/Vue) stay intact. Browsers without the API
+     fall back to wrapping only the blasted runs in transparent spans. */
+  var hlSupported = !!(window.CSS && CSS.highlights && typeof window.Highlight === "function" &&
+                       typeof window.StaticRange === "function");
+  var hl = null;
+  var textStates = new WeakMap();   // Text -> { len, bits, count, ranges }
+  var measRange = document.createRange();
+  var segmenter = null;
+  try { segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" }); } catch (e) {}
+  var SKIP_TEXT_PARENT = { script:1, style:1, noscript:1, textarea:1, option:1, select:1, title:1, template:1 };
 
-    // Coarse check: bounding box of whole text node
-    var coarseRange = document.createRange();
-    coarseRange.selectNode(textNode);
-    var bbox = coarseRange.getBoundingClientRect();
-    if (!bbox || bbox.width < 1) return;
-    var nx = Math.max(bbox.left, Math.min(cx, bbox.right));
-    var ny = Math.max(bbox.top,  Math.min(cy, bbox.bottom));
-    if (Math.hypot(nx - cx, ny - cy) > BLAST_RADIUS + 30) return;
+  function isSpaceCode(c) {
+    return c <= 32 || c === 160 || c === 0x1680 || (c >= 0x2000 && c <= 0x200D) ||
+           c === 0x2028 || c === 0x2029 || c === 0x202F || c === 0x205F || c === 0x3000 ||
+           c === 0xFEFF || c === 0x00AD;
+  }
 
-    var parent = textNode.parentElement;
-    if (!parent) return;
-    // Skip text inside any already-scattered element (whole atom flung, or prior char blast)
-    if (parent.closest("[data-cb-scattered]")) return;
+  function ensureHighlight() {
+    if (hl) return;
+    hl = new Highlight();
+    try { hl.priority = 1000; } catch (e) {}
+    CSS.highlights.set(HL_NAME, hl);
+  }
 
-    var cs         = getComputedStyle(parent);
-    var fontSize   = cs.fontSize   || "14px";
-    var fontFamily = cs.fontFamily || "system-ui,sans-serif";
-    var fontWeight = cs.fontWeight || "400";
-    var color      = cs.color      || "#000";
-
-    // Fine pass: measure every character using Range — no measurer div needed
-    var toFly = [];
-    var inBlastIdx = {};
-    for (var i = 0; i < text.length; i++) {
-      var ch = text[i];
-      if (ch === " " || ch === "\n" || ch === "\t" || ch === "\r") continue;
-      try {
-        var cr = document.createRange();
-        cr.setStart(textNode, i);
-        cr.setEnd(textNode, i + 1);
-        var rect = cr.getBoundingClientRect();
-        if (!rect || rect.width < 0.5 || rect.height < 0.5) continue;
-        var px = rect.left + rect.width  / 2;
-        var py = rect.top  + rect.height / 2;
-        if (Math.hypot(px - cx, py - cy) <= BLAST_RADIUS) {
-          toFly.push({ idx: i, ch: ch, rect: rect, px: px, py: py });
-          inBlastIdx[i] = true;
-        }
-      } catch(e) {}
+  function textStateFor(node, create) {
+    var st = textStates.get(node);
+    if (st && st.len !== node.length) {   // the page rewrote this text — start over
+      dropRanges(st.ranges);
+      textStates.delete(node);
+      st = null;
     }
+    if (!st && create) {
+      st = { len: node.length, bits: new Uint8Array(node.length), count: 0, ranges: [] };
+      textStates.set(node, st);
+    }
+    return st || null;
+  }
 
-    if (!toFly.length) return;
+  function dropRanges(ranges) {
+    if (!hl || !ranges) return;
+    for (var i = 0; i < ranges.length; i++) hl.delete(ranges[i]);
+    ranges.length = 0;
+  }
 
-    // Replace the text node with per-char spans:
-    //   - chars in blast radius → visibility:hidden (flying div takes their place)
-    //   - other chars           → visible, text unchanged
-    var frag = document.createDocumentFragment();
-    var allSpans = [];
-    for (var ci = 0; ci < text.length; ci++) {
-      var sp = document.createElement("span");
-      sp.style.cssText = "display:inline;white-space:pre;";
-      sp.textContent = (text[ci] === " ") ? "\u00A0" : text[ci];
-      if (inBlastIdx[ci]) {
-        sp.style.visibility = "hidden";
-        sp.dataset.cbScattered = "1"; // won't scatter again in future shots
+  function caretAt(x, y) {
+    var node = null, off = 0;
+    try {
+      if (document.caretPositionFromPoint) {
+        var p = document.caretPositionFromPoint(x, y);
+        if (p) { node = p.offsetNode; off = p.offset; }
+      } else if (document.caretRangeFromPoint) {
+        var cr = document.caretRangeFromPoint(x, y);
+        if (cr) { node = cr.startContainer; off = cr.startOffset; }
       }
-      frag.appendChild(sp);
-      allSpans.push(sp);
+    } catch (e) { return null; }
+    if (!node || node.nodeType !== 3) return null;
+    return { node: node, off: off };
+  }
+
+  function collectBlastChars(cx, cy, R, atoms) {
+    var wins = new Map();   // Text -> [lo, hi] offsets worth measuring
+    function addWin(n, lo, hi) {
+      var w = wins.get(n);
+      if (!w) wins.set(n, [lo, hi]);
+      else { if (lo < w[0]) w[0] = lo; if (hi > w[1]) w[1] = hi; }
     }
-    if (textNode.parentNode) {
-      textNode.parentNode.replaceChild(frag, textNode);
-      restoreList.push({ type: "textnode", parent: parent, spans: allSpans, origText: text });
+    // Caret probes at the chord ends + centre of each scanline across the blast.
+    for (var y = cy - R + 3; y <= cy + R - 3; y += 7) {
+      if (y < 0 || y >= viewH) continue;
+      var dy = y - cy, half = Math.sqrt(Math.max(0, R * R - dy * dy));
+      var prev = null;
+      for (var k = -1; k <= 1; k++) {
+        var x = Math.max(0, Math.min(viewW - 1, cx + k * half));
+        var c = caretAt(x, y);
+        if (!c) { prev = null; continue; }
+        addWin(c.node, c.off - 2, c.off + 2);
+        if (prev && prev.node !== c.node) bridgeWindows(prev, c, addWin);
+        prev = c;
+      }
     }
 
-    // Create a flying div for each in-blast character
-    for (var fi = 0; fi < toFly.length; fi++) {
-      var item = toFly[fi];
-      var charEl = document.createElement("div");
-      charEl.style.cssText = [
-        "position:fixed;",
-        "left:"+item.rect.left+"px;top:"+item.rect.top+"px;",
-        "width:"+(item.rect.width||8)+"px;height:"+(item.rect.height||14)+"px;",
-        "font-size:"+fontSize+";font-family:"+fontFamily+";font-weight:"+fontWeight+";",
-        "color:"+color+";line-height:1;text-align:center;",
-        "pointer-events:none;z-index:2147483646;",
-        "white-space:pre;overflow:visible;"
-      ].join("");
-      charEl.textContent = item.ch;
-      document.documentElement.appendChild(charEl);
-      removeList.push(charEl);
-
-      var dist  = Math.hypot(item.px - cx, item.py - cy);
-      var force = (1 - Math.min(dist / BLAST_RADIUS, 1)) * 640 + Math.random() * 180;
-      var ang   = Math.atan2(item.py - cy, item.px - cx);
-      shards.push({
-        el: charEl, x: item.px, y: item.py, ox: item.px, oy: item.py,
-        vx: Math.cos(ang) * force + (Math.random()-0.5) * 200,
-        vy: Math.sin(ang) * force - 260 - Math.random() * 250,
-        rotation: 0, rotSpeed: (Math.random()-0.5) * 560,
-        life: 1.2 + Math.random() * 1.0, fade: 0.35
+    var out = [], R2 = R * R, styleCache = new Map();
+    wins.forEach(function (w, node) {
+      if (out.length >= MAX_BLAST_CHARS) return;
+      var parent = node.parentElement;
+      if (!parent || SKIP_TEXT_PARENT[parent.localName] || parent.namespaceURI !== HTML_NS) return;
+      if (parent.closest("[data-cb-hidden],[data-cb-ui],[data-cb-blasted]")) return;
+      for (var a = 0; a < atoms.length; a++) if (atoms[a].el.contains(node)) return;
+      var st = textStateFor(node, false);
+      var data = node.data, len = data.length;
+      var lo = Math.max(0, w[0]), hi = Math.min(len, w[1]);
+      if (hi <= lo) return;
+      forEachCluster(data, lo, hi, function (i, n) {
+        if (out.length >= MAX_BLAST_CHARS) return;
+        if (isSpaceCode(data.charCodeAt(i))) return;
+        if (st && st.bits[i]) return;
+        measRange.setStart(node, i);
+        measRange.setEnd(node, i + n);
+        var rect = measRange.getBoundingClientRect();
+        if (rect.width < 0.5 || rect.height < 0.5) return;
+        var px = rect.left + rect.width / 2 - cx, py = rect.top + rect.height / 2 - cy;
+        if (px * px + py * py > R2) return;
+        var sty = styleCache.get(parent);
+        if (!sty) { sty = textStyle(parent); styleCache.set(parent, sty); }
+        out.push({ node: node, i: i, n: n, rect: rect, style: sty });
       });
+    });
+    return out;
+  }
+
+  // Text between two caret hits on the same scanline (e.g. "a <b>bold</b> word").
+  function bridgeWindows(a, b, addWin) {
+    var first = a, last = b;
+    if (a.node.compareDocumentPosition(b.node) & Node.DOCUMENT_POSITION_PRECEDING) { first = b; last = a; }
+    addWin(first.node, first.off - 2, first.off + 80);
+    addWin(last.node, last.off - 80, last.off + 2);
+    var tw = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+    tw.currentNode = first.node;
+    for (var i = 0, n; i < 8 && (n = tw.nextNode()) && n !== last.node; i++) addWin(n, 0, 80);
+  }
+
+  // Calls fn(offset, length) for each grapheme cluster starting in [lo, hi).
+  function forEachCluster(data, lo, hi, fn) {
+    if (segmenter) {
+      var base = Math.max(0, lo - 6);
+      var it = segmenter.segment(data.slice(base, Math.min(data.length, hi + 6)))[Symbol.iterator]();
+      for (var step = it.next(); !step.done; step = it.next()) {
+        var off = base + step.value.index;
+        if (off >= hi) break;
+        if (off >= lo) fn(off, step.value.segment.length);
+      }
+      return;
+    }
+    for (var i = lo; i < hi; i++) {
+      var c = data.charCodeAt(i), n = (c >= 0xD800 && c <= 0xDBFF && i + 1 < data.length) ? 2 : 1;
+      fn(i, n);
+      i += n - 1;
     }
   }
 
-  /* ── IMAGE SHATTERING (4×4 grid) ────────────────────────────────────────── */
-  function shatterImagesNear(cx, cy) {
-    var imgs = document.querySelectorAll("img");
-    var targets = [];
-    for (var i = 0; i < imgs.length; i++) {
-      var img = imgs[i];
-      if (img.closest("#__cannon_wrapper")) continue;
-      if (img.dataset && img.dataset.cbDone) continue;  // already shattered
-      var rect = img.getBoundingClientRect();
-      if (rect.width < 4 || rect.height < 4) continue;
-      var nearX = Math.max(rect.left, Math.min(cx, rect.right));
-      var nearY = Math.max(rect.top,  Math.min(cy, rect.bottom));
-      if (Math.hypot(nearX-cx, nearY-cy) > BLAST_RADIUS) continue;
-      targets.push({ img: img, rect: rect });
+  function isTransparentColor(c) { return !c || c === "transparent" || /,\s*0\)$/.test(c); }
+  function textStyle(el) {
+    var cs = getComputedStyle(el);
+    var color = cs.webkitTextFillColor;
+    if (isTransparentColor(color)) color = cs.color;
+    if (isTransparentColor(color)) color = null;    // invisible text: hide it, nothing flies
+    var font = (cs.fontStyle && cs.fontStyle !== "normal" ? cs.fontStyle + " " : "") +
+               (cs.fontVariant === "small-caps" ? "small-caps " : "") +
+               cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily;
+    return { font: font, color: color, tt: cs.textTransform };
+  }
+
+  var measureCtx = document.createElement("canvas").getContext("2d");
+  var ascentCache = new Map();
+  function fontAscent(font, h) {
+    var a = ascentCache.get(font);
+    if (a === undefined) {
+      measureCtx.font = font;
+      var m = measureCtx.measureText("Hg");
+      a = m.fontBoundingBoxAscent > 0 ? m.fontBoundingBoxAscent : -1;
+      ascentCache.set(font, a);
     }
-    // Writes after all reads — keeps layout from thrashing between images.
-    for (var t = 0; t < targets.length; t++) {
-      targets[t].img.dataset.cbDone = "1";
-      shatterImage(targets[t].img, targets[t].rect, cx, cy);
+    return a > 0 ? a : h * 0.8;
+  }
+
+  /* Flying characters are drawn from a glyph atlas: each (font, colour, char)
+     is rasterized once, upright, and every frame only draws rotated copies of
+     it. Calling fillText with a new rotation every frame makes Chrome
+     re-rasterize and upload the glyphs each frame, which stalls the frame. */
+  var ATLAS_SIZE = 1024;   // device pixels
+  var atlas = null;
+  function newAtlas() {
+    var c = document.createElement("canvas");
+    c.width = c.height = ATLAS_SIZE;
+    atlas = { c: c, ctx: c.getContext("2d"), x: 1, y: 1, rowH: 0, map: new Map(), dpr: dpr };
+  }
+  function glyphFor(ch, font, color) {
+    if (!atlas || atlas.dpr !== dpr) newAtlas();
+    var key = font + "\n" + color + "\n" + ch;
+    var g = atlas.map.get(key);
+    if (g !== undefined) return g;
+    var x = atlas.ctx;
+    x.setTransform(1, 0, 0, 1, 0, 0);
+    x.font = font;
+    var m = x.measureText(ch), pad = 2;
+    var asc = m.fontBoundingBoxAscent > 0 ? m.fontBoundingBoxAscent : m.actualBoundingBoxAscent;
+    var desc = m.fontBoundingBoxDescent > 0 ? m.fontBoundingBoxDescent : m.actualBoundingBoxDescent;
+    var left = Math.max(0, m.actualBoundingBoxLeft || 0);
+    var right = Math.max(m.width, m.actualBoundingBoxRight || 0);
+    var wCss = left + right + pad * 2, hCss = asc + desc + pad * 2;
+    var w = Math.ceil(wCss * dpr), h = Math.ceil(hCss * dpr);
+    if (!(w > 0 && h > 0) || w > 256 || h > 256) { atlas.map.set(key, null); return null; }  // huge glyph: fillText
+    if (atlas.x + w > ATLAS_SIZE) { atlas.x = 1; atlas.y += atlas.rowH + 1; atlas.rowH = 0; }
+    if (atlas.y + h > ATLAS_SIZE) { newAtlas(); return glyphFor(ch, font, color); }
+    x.setTransform(dpr, 0, 0, dpr, atlas.x, atlas.y);
+    x.textAlign = "left";
+    x.textBaseline = "alphabetic";
+    x.fillStyle = color;
+    x.fillText(ch, pad + left, pad + asc);
+    // dx/dy place the slot so the glyph is centred like textAlign:center on the baseline.
+    g = { c: atlas.c, sx: atlas.x, sy: atlas.y, sw: w, sh: h, w: wCss, h: hCss,
+          dx: -m.width / 2 - pad - left, dy: -pad - asc };
+    atlas.x += w + 1;
+    if (h > atlas.rowH) atlas.rowH = h;
+    atlas.map.set(key, g);
+    return g;
+  }
+
+  // WRITE phase for characters: hide them and launch canvas copies.
+  function blastChars(chars, cx, cy) {
+    var touched = new Map();
+    for (var i = 0; i < chars.length; i++) {
+      var c = chars[i];
+      var st = textStateFor(c.node, true);
+      if (st.bits[c.i]) continue;
+      for (var k = 0; k < c.n; k++) st.bits[c.i + k] = 1;
+      st.count++;
+      var t = touched.get(c.node);
+      if (!t) { t = { st: st, runs: [] }; touched.set(c.node, t); }
+      t.runs.push([c.i, c.i + c.n]);
+      if (c.style.color && debris.length < MAX_DEBRIS) spawnCharDebris(c, cx, cy);
+    }
+    touched.forEach(function (t, node) {
+      if (hlSupported) highlightRuns(node, t.st);
+      else fallbackHide(node, t.runs);
+    });
+  }
+
+  // Rebuild this node's ranges from its bitset; whitespace between blasted
+  // characters joins runs so the highlight stays small.
+  function highlightRuns(node, st) {
+    ensureHighlight();
+    dropRanges(st.ranges);
+    var bits = st.bits, data = node.data, len = st.len, start = -1, last = -1;
+    for (var i = 0; i <= len; i++) {
+      if (i < len && bits[i]) { if (start < 0) start = i; last = i; continue; }
+      if (start >= 0 && (i === len || !isSpaceCode(data.charCodeAt(i)))) {
+        var r = new StaticRange({ startContainer: node, startOffset: start, endContainer: node, endOffset: last + 1 });
+        hl.add(r);
+        st.ranges.push(r);
+        start = -1;
+      }
     }
   }
 
-  function shatterImage(img, rect, cx, cy) {
-    var G = 4, pw = rect.width/G, ph = rect.height/G;
-    restoreList.push({ el: img, prop: "visibility", value: img.style.visibility });
-    img.style.visibility = "hidden";
+  // Fallback without the Highlight API: wrap just the blasted runs in
+  // transparent spans (spaces and line breaks are left untouched).
+  var fbOriginal = new Map();   // original Text -> its original data
+  var fbCreated = [];           // nodes we inserted
+  function fallbackHide(node, runs) {
+    if (!fbOriginal.has(node)) fbOriginal.set(node, node.data);
+    runs.sort(function (a, b) { return a[0] - b[0]; });
+    for (var r = runs.length - 1; r >= 0; r--) {
+      var a = runs[r][0], b = runs[r][1];
+      if (b < node.length) fbCreated.push(node.splitText(b));
+      var mid = node.splitText(a);
+      var span = document.createElement("span");
+      span.setAttribute("data-cb-blasted", "");
+      span.style.cssText = "color:transparent!important;-webkit-text-fill-color:transparent!important;text-shadow:none!important;";
+      mid.parentNode.insertBefore(span, mid);
+      span.appendChild(mid);
+      fbCreated.push(span);
+    }
+  }
+
+  // Flying copies of an element keep the holes already blasted into its text.
+  function copyHighlights(orig, clone) {
+    if (!hl) return null;
+    var ranges = null;
+    var wa = document.createTreeWalker(orig, NodeFilter.SHOW_TEXT);
+    var wb = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
+    var ta, tb;
+    while ((ta = wa.nextNode()) && (tb = wb.nextNode())) {
+      var st = textStates.get(ta);
+      if (!st || !st.ranges.length || st.len !== ta.length) continue;
+      for (var i = 0; i < st.ranges.length; i++) {
+        var r = new StaticRange({ startContainer: tb, startOffset: st.ranges[i].startOffset,
+                                  endContainer: tb, endOffset: st.ranges[i].endOffset });
+        hl.add(r);
+        (ranges || (ranges = [])).push(r);
+      }
+    }
+    return ranges;
+  }
+
+  // Characters still showing in an element (blasted ones don't count).
+  function visibleTextLength(el, cap) {
+    var w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), t, total = 0;
+    while ((t = w.nextNode())) {
+      var p = t.parentElement;
+      if (!p || SKIP_TEXT_PARENT[p.localName] || p.hasAttribute("data-cb-blasted")) continue;
+      var data = t.data, st = textStateFor(t, false), word = false;
+      for (var i = 0; i < data.length; i++) {
+        if (isSpaceCode(data.charCodeAt(i))) { if (word) { total++; word = false; } continue; }
+        if (st && st.bits[i]) continue;
+        total++; word = true;
+      }
+      if (total > cap) break;
+    }
+    return total;
+  }
+
+  function spawnCharDebris(c, cx, cy) {
+    var r = c.rect, px = r.left + r.width / 2, py = r.top + r.height / 2;
+    var dist  = Math.hypot(px - cx, py - cy);
+    var force = (1 - Math.min(dist / BLAST_RADIUS, 1)) * 640 + Math.random() * 180;
+    var ang   = Math.atan2(py - cy, px - cx);
+    var data = c.node.data, ch = data.substr(c.i, c.n), tt = c.style.tt;
+    if (tt === "uppercase") ch = ch.toUpperCase();
+    else if (tt === "lowercase") ch = ch.toLowerCase();
+    else if (tt === "capitalize" && (c.i === 0 || isSpaceCode(data.charCodeAt(c.i - 1)))) ch = ch.toUpperCase();
+    debris.push({
+      t: 0, ch: ch, font: c.style.font, color: c.style.color, g: glyphFor(ch, c.style.font, c.style.color),
+      base: fontAscent(c.style.font, r.height) - r.height / 2,
+      x: px, y: py,
+      vx: Math.cos(ang) * force + (Math.random()-0.5) * 200,
+      vy: Math.sin(ang) * force - 260 - Math.random() * 250,
+      rot: 0, rs: (Math.random()-0.5) * 560 * Math.PI / 180,
+      life: 1.2 + Math.random() * 1.0, fade: 0.35
+    });
+  }
+
+  /* ── IMAGE / VIDEO / CANVAS SHATTERING (4×4 grid on the game canvas) ───────
+     The element is drawn once into a snapshot canvas (exactly what is on
+     screen: currentSrc, object-fit, no new network request), then 16 pieces of
+     that snapshot fly on the overlay canvas. */
+  function shatterMedia(m, cx, cy) {
+    var el = m.el, rect = m.rect;
+    if (shattered.has(el)) return;
+    shattered.add(el);
+    var snap = snapshotMedia(el, rect, m.cs || getComputedStyle(el));
+    hideEl(el);
+    if (!snap) return;
+    var G = 4, pw = rect.width / G, ph = rect.height / G, k = snap.scale;
     for (var row = 0; row < G; row++) {
       for (var col = 0; col < G; col++) {
-        var piece = document.createElement("div");
-        var px = rect.left+col*pw, py = rect.top+row*ph;
-        piece.style.cssText = [
-          "position:fixed;left:"+px+"px;top:"+py+"px;",
-          "width:"+pw+"px;height:"+ph+"px;",
-          "background-image:url('"+img.src+"');",
-          "background-size:"+rect.width+"px "+rect.height+"px;",
-          "background-position:-"+(col*pw)+"px -"+(row*ph)+"px;",
-          "background-repeat:no-repeat;",
-          "pointer-events:none;z-index:2147483646;",
-          "box-shadow:0 1px 4px rgba(0,0,0,0.5);"
-        ].join("");
-        document.documentElement.appendChild(piece);
-        removeList.push(piece);
-        var pcx=px+pw/2, pcy=py+ph/2;
-        var dist=Math.hypot(pcx-cx,pcy-cy);
-        var f=(1-Math.min(dist/BLAST_RADIUS,1))*560+Math.random()*140;
-        var a=Math.atan2(pcy-cy,pcx-cx);
-        shards.push({el:piece,x:pcx,y:pcy,ox:pcx,oy:pcy,
-          vx:Math.cos(a)*f+(Math.random()-0.5)*160,
-          vy:Math.sin(a)*f-210-Math.random()*200,
-          rotation:0,rotSpeed:(Math.random()-0.5)*440,
-          life:1.4+Math.random()*0.9,fade:0.3});
+        if (debris.length >= MAX_DEBRIS) return;
+        var pcx = rect.left + col * pw + pw / 2, pcy = rect.top + row * ph + ph / 2;
+        var dist = Math.hypot(pcx - cx, pcy - cy);
+        var f = (1 - Math.min(dist / BLAST_RADIUS, 1)) * 560 + Math.random() * 140;
+        var a = Math.atan2(pcy - cy, pcx - cx);
+        debris.push({
+          t: 1, src: snap.canvas, sx: col * pw * k, sy: row * ph * k, sw: pw * k, sh: ph * k, w: pw, h: ph,
+          x: pcx, y: pcy,
+          vx: Math.cos(a) * f + (Math.random()-0.5) * 160,
+          vy: Math.sin(a) * f - 210 - Math.random() * 200,
+          rot: 0, rs: (Math.random()-0.5) * 440 * Math.PI / 180,
+          life: 1.4 + Math.random() * 0.9, fade: 0.3
+        });
       }
     }
   }
 
-  /* ── SHARD PHYSICS ───────────────────────────────────────────────────────── */
-  var stoggle = false;
-  function updateShards(dt) {
-    if (!shards.length) return;
-    var throttle = shards.length > 60;
-    stoggle = !stoggle;
-    var udt = throttle ? (stoggle ? 0 : dt*2) : dt;
-    for (var i = shards.length-1; i >= 0; i--) {
-      var s = shards[i];
-      if (udt > 0) {
-        s.vy += SHARD_G * udt;
-        s.vx *= 0.997;
-        s.x  += s.vx * udt;
-        s.y  += s.vy * udt;
-        s.rotation += s.rotSpeed * udt;
-        s.life -= udt;
-        s.el.style.transform = "translate("+(s.x-s.ox).toFixed(1)+"px,"+(s.y-s.oy).toFixed(1)+"px) rotate("+s.rotation.toFixed(1)+"deg)";
-        if (s.life <= s.fade) {
-          s.el.style.transition = "opacity 0.3s";
-          s.el.style.opacity = "0";
+  function posOffset(v, free) {
+    if (!v) return free / 2;
+    if (v.charAt(v.length - 1) === "%") return free * parseFloat(v) / 100;
+    return parseFloat(v) || 0;
+  }
+
+  function snapshotMedia(el, rect, cs) {
+    var tag = el.localName, iw = 0, ih = 0;
+    if (tag === "img") {
+      if (!el.complete) return null;
+      iw = el.naturalWidth; ih = el.naturalHeight;
+    } else if (tag === "video") {
+      if (el.readyState < 2) return null;
+      iw = el.videoWidth; ih = el.videoHeight;
+    } else if (tag === "canvas") {
+      iw = el.width; ih = el.height;
+    } else return null;
+    var bl = parseFloat(cs.borderLeftWidth) || 0, bt = parseFloat(cs.borderTopWidth) || 0;
+    var br = parseFloat(cs.borderRightWidth) || 0, bb = parseFloat(cs.borderBottomWidth) || 0;
+    var pl = parseFloat(cs.paddingLeft) || 0, pt = parseFloat(cs.paddingTop) || 0;
+    var pr = parseFloat(cs.paddingRight) || 0, pb = parseFloat(cs.paddingBottom) || 0;
+    var bx = bl + pl, by = bt + pt;
+    var bw = rect.width - bl - br - pl - pr, bh = rect.height - bt - bb - pt - pb;
+    if (bw <= 0 || bh <= 0) return null;
+    if (!iw || !ih) { iw = bw; ih = bh; }               // e.g. SVG without intrinsic size
+    var fit = cs.objectFit || "fill", w = bw, h = bh;
+    if (fit === "contain" || fit === "cover" || fit === "scale-down") {
+      var s = fit === "cover" ? Math.max(bw / iw, bh / ih) : Math.min(bw / iw, bh / ih);
+      if (fit === "scale-down") s = Math.min(s, 1);
+      w = iw * s; h = ih * s;
+    } else if (fit === "none") { w = iw; h = ih; }
+    var pos = (cs.objectPosition || "50% 50%").split(" ");
+    var ox = bx + posOffset(pos[0], bw - w), oy = by + posOffset(pos[1], bh - h);
+    var scale = Math.min(dpr, 2, 2048 / Math.max(rect.width, rect.height));
+    var c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(rect.width * scale));
+    c.height = Math.max(1, Math.round(rect.height * scale));
+    var x = c.getContext("2d");
+    x.scale(scale, scale);
+    x.beginPath(); x.rect(bx, by, bw, bh); x.clip();
+    try { x.drawImage(el, ox, oy, w, h); } catch (e) { return null; }   // broken / not decodable
+    return { canvas: c, scale: scale };
+  }
+
+  /* ── CANVAS DEBRIS (flying characters + image pieces) ───────────────────── */
+  function updateDebris(dt) {
+    var j = 0;
+    for (var i = 0; i < debris.length; i++) {
+      var d = debris[i];
+      d.vy += SHARD_G * dt;
+      d.vx *= 0.997;
+      d.x  += d.vx * dt;
+      d.y  += d.vy * dt;
+      d.rot += d.rs * dt;
+      d.life -= dt;
+      if (d.life > 0 && d.y < viewH + 400) debris[j++] = d;
+    }
+    debris.length = j;
+  }
+
+  function renderDebris() {
+    if (!debris.length) return;
+    var lastFont = "", lastFill = "";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    for (var i = 0; i < debris.length; i++) {
+      var d = debris[i];
+      if (d.x < -120 || d.x > viewW + 120 || d.y < -120 || d.y > viewH + 120) continue;
+      var c = Math.cos(d.rot) * dpr, s = Math.sin(d.rot) * dpr;
+      ctx.setTransform(c, s, -s, c, d.x * dpr, d.y * dpr);
+      ctx.globalAlpha = d.life < d.fade ? Math.max(0, d.life / d.fade) : 1;
+      if (d.t === 0) {
+        var g = d.g;
+        if (g) {
+          ctx.drawImage(g.c, g.sx, g.sy, g.sw, g.sh, g.dx, d.base + g.dy, g.w, g.h);
+        } else {
+          if (d.font !== lastFont) { ctx.font = d.font; lastFont = d.font; }
+          if (d.color !== lastFill) { ctx.fillStyle = d.color; lastFill = d.color; }
+          ctx.fillText(d.ch, 0, d.base);
         }
-      }
-      if (s.life <= 0) {
-        if (s.el.parentNode) s.el.parentNode.removeChild(s.el);
-        shards.splice(i, 1);
+      } else {
+        ctx.fillStyle = "rgba(0,0,0,0.35)"; lastFill = "";
+        ctx.fillRect(-d.w / 2 + 1, -d.h / 2 + 2, d.w, d.h);
+        ctx.drawImage(d.src, d.sx, d.sy, d.sw, d.sh, -d.w / 2, -d.h / 2, d.w, d.h);
       }
     }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+
+  /* ── PRE-RENDERED SPRITES (instead of per-frame shadowBlur / gradients) ─── */
+  var sprites = {};
+  function spriteCanvas(cssSize, draw) {
+    var c = document.createElement("canvas");
+    c.width = c.height = Math.max(1, Math.ceil(cssSize * dpr));
+    var x = c.getContext("2d");
+    x.setTransform(dpr, 0, 0, dpr, cssSize * dpr / 2, cssSize * dpr / 2);   // origin = centre
+    draw(x, cssSize / 2);
+    return c;
+  }
+  function radialSprite(stops) {
+    return spriteCanvas(64, function (x, r) {
+      var g = x.createRadialGradient(0, 0, 0, 0, 0, r);
+      for (var i = 0; i < stops.length; i++) g.addColorStop(stops[i][0], stops[i][1]);
+      x.fillStyle = g; x.beginPath(); x.arc(0, 0, r, 0, Math.PI * 2); x.fill();
+    });
+  }
+  function buildSprites() {
+    // Cannonball + its glow (shadowBlur is in device pixels, like the original).
+    var ext = BALL_R + 60 / dpr;
+    sprites.ballExt = ext;
+    sprites.ball = spriteCanvas(ext * 2, function (x) {
+      x.shadowColor = "rgba(255,100,0,1)"; x.shadowBlur = 38;
+      var g = x.createRadialGradient(-BALL_R*0.3, -BALL_R*0.3, 1, 0, 0, BALL_R);
+      g.addColorStop(0,"#ffffff"); g.addColorStop(0.28,"#ffdd00");
+      g.addColorStop(0.62,"#ff5500"); g.addColorStop(1,"#8a1400");
+      x.fillStyle = g; x.beginPath(); x.arc(0, 0, BALL_R, 0, Math.PI*2); x.fill();
+    });
+    sprites.smoke  = radialSprite([[0, "rgba(50,50,50,0.7)"], [1, "rgba(12,12,12,0)"]]);
+    sprites.crater = radialSprite([[0, "rgba(12,5,1,1)"], [0.6, "rgba(30,12,3,0.5)"], [1, "rgba(0,0,0,0)"]]);
+    sprites.flash  = radialSprite([[0, "rgba(255,255,215,1)"], [0.5, "rgba(255,155,15,0.8)"], [1, "rgba(255,55,0,0)"]]);
+    sprites.glow   = {};
+  }
+  function glowSprite(hex) {
+    var s = sprites.glow[hex];
+    if (!s) s = sprites.glow[hex] = radialSprite([[0, hexA(hex, 0.75)], [0.35, hexA(hex, 0.35)], [1, hexA(hex, 0)]]);
+    return s;
+  }
+
+  function hexA(hex, a) {
+    var n=parseInt(hex.slice(1),16);
+    return "rgba("+((n>>16)&255)+","+(((n>>8)&255))+","+(n&255)+","+a+")";
   }
 
   /* ── PARTICLE UPDATE ─────────────────────────────────────────────────────── */
@@ -1338,13 +1576,11 @@
   /* ── RENDERING ───────────────────────────────────────────────────────────── */
   function renderCraters() {
     for (var i = 0; i < craters.length; i++) {
-      var c = craters[i], a = Math.min(c.life/c.maxLife,1)*0.42;
-      var g = ctx.createRadialGradient(c.x,c.y,0,c.x,c.y,c.r);
-      g.addColorStop(0,"rgba(12,5,1,"+a+")");
-      g.addColorStop(0.6,"rgba(30,12,3,"+(a*0.5)+")");
-      g.addColorStop(1,"rgba(0,0,0,0)");
-      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(c.x,c.y,c.r,0,Math.PI*2); ctx.fill();
+      var c = craters[i];
+      ctx.globalAlpha = Math.min(c.life/c.maxLife, 1) * 0.42;
+      ctx.drawImage(sprites.crater, c.x - c.r, c.y - c.r, c.r * 2, c.r * 2);
     }
+    ctx.globalAlpha = 1;
   }
 
   function renderTrajectoryPreview() {
@@ -1355,15 +1591,12 @@
     var x = m.x, y = m.y, vx = sol.vx, vy = sol.vy;
     var T = sol.T, dt = T / 46;  // ~46 dots along the arc
     ctx.save();
-    // no per-dot shadowBlur — glowy shadows on 46 dots every frame cost more
-    // than the entire rest of the render pass
     for (var step = 1; step <= 46; step++) {
       vy += BALL_G * dt;
       x  += vx * dt;
       y  += vy * dt;
       var t = step / 46;
-      var onScreen = (x >= 0 && x <= window.innerWidth && y >= 0 && y <= window.innerHeight);
-      if (onScreen) {
+      if (x >= 0 && x <= viewW && y >= 0 && y <= viewH) {
         var alpha = 0.9 - t * 0.55, dotR = 2.5 + t * 2.5;
         var gg = Math.floor(t < 0.5 ? 140 + t * 230 : 255 - t * 120);
         ctx.beginPath();
@@ -1380,28 +1613,36 @@
     ctx.beginPath(); ctx.arc(targetX, targetY, 16, 0, Math.PI*2);
     ctx.strokeStyle = "rgba(255,40,0,0.45)"; ctx.lineWidth = 1.5; ctx.stroke();
     ctx.restore();
-    renderPowerRing(m);
+    renderPowerRing();
   }
 
-  function renderPowerRing(m) {
+  function renderPowerRing() {
     var p=getPivot(), R=64;
     var start=-Math.PI*0.75, end=start+Math.PI*1.5*aimPower;
     var col = aimPower<0.5 ? "rgb("+(Math.floor(70+aimPower*370))+",218,50)"
                            : "rgb(255,"+(Math.floor(218-(aimPower-0.5)*400))+",28)";
     ctx.save();
-    ctx.lineWidth=6; ctx.lineCap="round";
+    ctx.lineCap="round";
+    ctx.lineWidth=6;
     ctx.strokeStyle="rgba(255,255,255,0.1)";
     ctx.beginPath(); ctx.arc(p.x,p.y,R,start,start+Math.PI*1.5); ctx.stroke();
-    ctx.strokeStyle=col; ctx.shadowColor=col; ctx.shadowBlur=14;
+    ctx.strokeStyle=col;
+    ctx.globalAlpha=0.25; ctx.lineWidth=13;           // glow halo (was shadowBlur)
     ctx.beginPath(); ctx.arc(p.x,p.y,R,start,end); ctx.stroke();
-    ctx.fillStyle=col; ctx.font="bold 13px system-ui,sans-serif";
+    ctx.globalAlpha=1; ctx.lineWidth=6;
+    ctx.beginPath(); ctx.arc(p.x,p.y,R,start,end); ctx.stroke();
+    ctx.font="bold 13px system-ui,sans-serif";
     ctx.textAlign="center"; ctx.textBaseline="middle";
-    ctx.shadowColor="rgba(0,0,0,0.9)"; ctx.shadowBlur=5;
-    ctx.fillText(Math.round(aimPower*100)+"%", p.x, p.y-R-15);
+    ctx.lineWidth=3; ctx.strokeStyle="rgba(0,0,0,0.6)";
+    var label = Math.round(aimPower*100)+"%";
+    ctx.strokeText(label, p.x, p.y-R-15);
+    ctx.fillStyle=col;
+    ctx.fillText(label, p.x, p.y-R-15);
     ctx.restore();
   }
 
   function renderBalls() {
+    var ext = sprites.ballExt;
     for (var i = 0; i < balls.length; i++) {
       var b = balls[i];
       // Fire trail
@@ -1411,14 +1652,8 @@
         var col2 = tt>0.75 ? "rgba(255,255,200,"+alpha+")" : tt>0.45 ? "rgba(255,165,25,"+alpha+")" : "rgba(255,70,0,"+(alpha*0.55)+")";
         ctx.beginPath(); ctx.fillStyle=col2; ctx.arc(tp.x,tp.y,rad,0,Math.PI*2); ctx.fill();
       }
-      // Glowing ball
-      ctx.save();
-      ctx.shadowColor="rgba(255,100,0,1)"; ctx.shadowBlur=38;
-      var g2 = ctx.createRadialGradient(b.x-BALL_R*0.3,b.y-BALL_R*0.3,1,b.x,b.y,BALL_R);
-      g2.addColorStop(0,"#ffffff"); g2.addColorStop(0.28,"#ffdd00");
-      g2.addColorStop(0.62,"#ff5500"); g2.addColorStop(1,"#8a1400");
-      ctx.fillStyle=g2; ctx.beginPath(); ctx.arc(b.x,b.y,BALL_R,0,Math.PI*2); ctx.fill();
-      ctx.restore();
+      // Glowing ball (pre-rendered)
+      ctx.drawImage(sprites.ball, b.x - ext, b.y - ext, ext * 2, ext * 2);
       // Spin spot
       var sx=b.x+Math.cos(b.spin)*BALL_R*0.38, sy=b.y+Math.sin(b.spin)*BALL_R*0.38;
       ctx.beginPath(); ctx.fillStyle="rgba(65,12,0,0.5)";
@@ -1426,56 +1661,51 @@
     }
   }
 
-  function hexA(hex, a) {
-    var n=parseInt(hex.slice(1),16);
-    return "rgba("+((n>>16)&255)+","+(((n>>8)&255))+","+(n&255)+","+a+")";
-  }
-
   function renderParticles() {
     for (var i=0; i<particles.length; i++) {
       var p=particles[i], t=Math.max(p.life/p.maxLife,0);
-      ctx.save();
+      ctx.globalAlpha = t;
       if (p.type==="spark") {
         var spd2=Math.hypot(p.vx,p.vy), ang2=Math.atan2(p.vy,p.vx);
         var len=Math.min(spd2*0.02,13)+p.size;
-        ctx.translate(p.x,p.y); ctx.rotate(ang2);
-        ctx.fillStyle=hexA(p.color,t);
+        var c=Math.cos(ang2)*dpr, s=Math.sin(ang2)*dpr;
+        ctx.setTransform(c, s, -s, c, p.x*dpr, p.y*dpr);
+        ctx.fillStyle=p.color;
         ctx.fillRect(-len/2,-p.size/2,len,Math.max(p.size*0.55,1));
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       } else if (p.type==="ember") {
-        ctx.globalAlpha=t; ctx.fillStyle=p.color;
-        ctx.shadowColor=p.color; ctx.shadowBlur=8;
-        ctx.beginPath(); ctx.arc(p.x,p.y,p.size*(0.45+t*0.55),0,Math.PI*2); ctx.fill();
+        var er=p.size*(0.45+t*0.55), G=er+6;
+        ctx.drawImage(glowSprite(p.color), p.x-G, p.y-G, G*2, G*2);
+        ctx.fillStyle=p.color;
+        ctx.beginPath(); ctx.arc(p.x,p.y,er,0,Math.PI*2); ctx.fill();
       } else {
         ctx.globalAlpha=t*0.3;
         var gw=p.size*(1+(1-t)*0.6);
-        var g3=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,gw);
-        g3.addColorStop(0,"rgba(50,50,50,0.7)"); g3.addColorStop(1,"rgba(12,12,12,0)");
-        ctx.fillStyle=g3; ctx.beginPath(); ctx.arc(p.x,p.y,gw,0,Math.PI*2); ctx.fill();
+        ctx.drawImage(sprites.smoke, p.x-gw, p.y-gw, gw*2, gw*2);
       }
-      ctx.restore();
     }
+    ctx.globalAlpha = 1;
     for (var j=0; j<shockwaves.length; j++) {
       var sw=shockwaves[j], st=sw.life/sw.maxLife;
-      ctx.save(); ctx.globalAlpha=st;
+      ctx.globalAlpha=st;
       ctx.lineWidth=sw.w*st; ctx.strokeStyle="rgba("+sw.color+","+st+")";
       ctx.beginPath(); ctx.arc(sw.x,sw.y,sw.r,0,Math.PI*2); ctx.stroke();
-      ctx.restore();
     }
     for (var k=0; k<mFlashes.length; k++) {
       var mf=mFlashes[k], mt=mf.life/mf.maxLife;
-      ctx.save(); ctx.globalAlpha=mt;
+      ctx.globalAlpha=mt;
       var fr=14+(1-mt)*20;
-      var gf=ctx.createRadialGradient(mf.x,mf.y,0,mf.x,mf.y,fr);
-      gf.addColorStop(0,"rgba(255,255,215,1)"); gf.addColorStop(0.5,"rgba(255,155,15,0.8)"); gf.addColorStop(1,"rgba(255,55,0,0)");
-      ctx.fillStyle=gf; ctx.beginPath(); ctx.arc(mf.x,mf.y,fr,0,Math.PI*2); ctx.fill();
+      ctx.drawImage(sprites.flash, mf.x-fr, mf.y-fr, fr*2, fr*2);
       ctx.strokeStyle="rgba(255,205,90,"+mt+")"; ctx.lineWidth=2;
+      ctx.beginPath();
       for (var sp=0; sp<mf.sparks.length; sp++) {
         var spk=mf.sparks[sp];
-        ctx.beginPath(); ctx.moveTo(mf.x,mf.y);
-        ctx.lineTo(mf.x+Math.cos(spk.a)*spk.len, mf.y+Math.sin(spk.a)*spk.len); ctx.stroke();
+        ctx.moveTo(mf.x,mf.y);
+        ctx.lineTo(mf.x+Math.cos(spk.a)*spk.len, mf.y+Math.sin(spk.a)*spk.len);
       }
-      ctx.restore();
+      ctx.stroke();
     }
+    ctx.globalAlpha = 1;
   }
 
   /* ── FLOATING POPUPS (score, taunts) drawn on canvas — cheap & smooth ────── */
@@ -1499,10 +1729,7 @@
   }
 
   /* ── SCREEN SHAKE ────────────────────────────────────────────────────────── */
-  // Intensity-based: shakeScreen() just bumps a magnitude that decays in the game
-  // loop. Rapid blasts no longer stack overlapping setTimeout chains (which caused
-  // the jittery, "shaking the screen" feel in danger mode).
-  var shakeTimers = [];
+  // Intensity-based: shakeScreen() bumps a magnitude that decays in the loop.
   var shakeMag = 0;
   function shakeScreen(amount) {
     shakeMag = Math.min(shakeMag + (amount || 8), 14);
@@ -1518,29 +1745,151 @@
     }
   }
 
+  /* ── BLAST MARKS ─────────────────────────────────────────────────────────────
+     A few scorch-mark variants are rendered once (same design as the old SVG
+     marks, without per-mark SVG filters). Each blast stamps one, rotated, into
+     a small canvas inside a page-anchored layer, so marks scroll with the
+     content they burned. They fade after MARK_TTL and are then removed. */
+  var markVariants = [];
+  var marksLayer = null;
+  var marks = [];
+  var marksCheckAt = 0;
+
+  function buildMarkVariant() {
+    var R = 22 + Math.random()*8;
+    var half = Math.ceil(R * 2 + 6);           // cracks reach ~1.9R from the centre
+    var c = document.createElement("canvas");
+    c.width = c.height = Math.ceil(half * 2 * dpr);
+    var x = c.getContext("2d");
+    x.setTransform(dpr, 0, 0, dpr, half * dpr, half * dpr);
+    var glow = 5 * dpr;                        // = SVG feGaussianBlur stdDeviation 2.5
+    // scorched rim
+    x.globalAlpha = 0.55; x.strokeStyle = "#200a00"; x.lineWidth = 9;
+    x.beginPath(); x.arc(0, 0, R*1.1, 0, Math.PI*2); x.stroke();
+    // glowing ember core
+    x.globalAlpha = 1;
+    var eg = x.createRadialGradient(0, 0, 0, 0, 0, R*0.9);
+    eg.addColorStop(0, "rgba(255,102,0,0.65)"); eg.addColorStop(0.55, "rgba(255,34,0,0.22)"); eg.addColorStop(1, "rgba(255,0,0,0)");
+    x.save(); x.shadowColor = "rgba(255,80,0,0.6)"; x.shadowBlur = glow;
+    x.fillStyle = eg; x.beginPath(); x.arc(0, 0, R*0.9, 0, Math.PI*2); x.fill(); x.restore();
+    // charred hole
+    var hg = x.createRadialGradient(0, 0, 0, 0, 0, R);
+    hg.addColorStop(0, "rgba(0,0,0,0.97)"); hg.addColorStop(0.42, "rgba(13,4,0,0.86)");
+    hg.addColorStop(0.74, "rgba(26,8,0,0.58)"); hg.addColorStop(1, "rgba(0,0,0,0)");
+    x.fillStyle = hg; x.beginPath(); x.arc(0, 0, R, 0, Math.PI*2); x.fill();
+    // cracks
+    var nc = 6 + Math.floor(Math.random()*4);
+    for (var i = 0; i < nc; i++) {
+      var baseA = (i/nc)*Math.PI*2 + (Math.random()-0.5)*0.55;
+      var len = R*(0.8 + Math.random()*0.8);
+      var px = 0, py = 0, segs = 2 + Math.floor(Math.random()*2), branches = [];
+      x.beginPath(); x.moveTo(0, 0);
+      for (var s = 0; s < segs; s++) {
+        var sa = baseA + (Math.random()-0.5)*0.28;
+        var sl = (len/segs)*(0.65+Math.random()*0.5);
+        px += Math.cos(sa)*sl; py += Math.sin(sa)*sl;
+        x.lineTo(px, py);
+        if (Math.random() > 0.5) branches.push([px, py, px+Math.cos(sa+0.85)*sl*0.28, py+Math.sin(sa+0.85)*sl*0.28]);
+      }
+      x.lineCap = "round"; x.globalAlpha = 0.88; x.strokeStyle = "#070707"; x.lineWidth = 1 + Math.random()*1.1;
+      x.stroke();
+      x.lineCap = "butt"; x.globalAlpha = 0.6; x.strokeStyle = "#080808"; x.lineWidth = 0.9;
+      for (var b = 0; b < branches.length; b++) {
+        x.beginPath(); x.moveTo(branches[b][0], branches[b][1]); x.lineTo(branches[b][2], branches[b][3]); x.stroke();
+      }
+    }
+    // debris specks
+    for (var d = 0; d < 16; d++) {
+      var da = Math.random()*Math.PI*2, dr = R*(0.5+Math.random()*0.75);
+      var gr = Math.floor(15+Math.random()*45);
+      x.globalAlpha = 0.45+Math.random()*0.5; x.fillStyle = "rgb("+gr+","+gr+","+gr+")";
+      x.beginPath(); x.arc(Math.cos(da)*dr, Math.sin(da)*dr, 0.8+Math.random()*2.2, 0, Math.PI*2); x.fill();
+    }
+    // glowing embers
+    x.shadowColor = "#ff4400"; x.shadowBlur = glow; x.fillStyle = "#ff4400";
+    for (var e = 0; e < 5; e++) {
+      var ea = Math.random()*Math.PI*2, er = R*(0.4+Math.random()*0.55);
+      x.globalAlpha = 0.3+Math.random()*0.45;
+      x.beginPath(); x.arc(Math.cos(ea)*er, Math.sin(ea)*er, 2+Math.random()*3, 0, Math.PI*2); x.fill();
+    }
+    return { c: c, half: half, dpr: dpr };
+  }
+  function pickMarkVariant() {
+    // Grow the variant pool lazily so no single blast pays for all of them.
+    if (markVariants.length < 6 && (!markVariants.length || Math.random() < 0.5)) markVariants.push(buildMarkVariant());
+    return markVariants[Math.floor(Math.random()*markVariants.length)];
+  }
+
+  function createBlastMark(cx, cy) {
+    var v = pickMarkVariant();
+    if (!marksLayer) {
+      marksLayer = document.createElement("div");
+      marksLayer.setAttribute("data-cb-ui", "1");
+      marksLayer.style.cssText = "position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2147483644;";
+      document.documentElement.appendChild(marksLayer);
+      removeList.push(marksLayer);
+    }
+    // Page coordinates, clipped to the document so marks never grow the page.
+    var docX = cx + scrollX0, docY = cy + scrollY0, half = v.half;
+    var L = Math.max(0, docX - half), T = Math.max(0, docY - half);
+    var Rr = Math.min(docW, docX + half), B = Math.min(docH, docY + half);
+    var w = Math.floor(Rr - L), h = Math.floor(B - T);
+    if (w < 4 || h < 4) return;
+    var c = document.createElement("canvas");
+    c.className = "__cb_mark";
+    c.width = Math.ceil(w * dpr);
+    c.height = Math.ceil(h * dpr);
+    c.style.cssText = "left:" + L.toFixed(1) + "px;top:" + T.toFixed(1) + "px;width:" + w + "px;height:" + h + "px;" +
+                      "transform-origin:" + (docX - L).toFixed(1) + "px " + (docY - T).toFixed(1) + "px;";
+    var x = c.getContext("2d");
+    var ang = Math.random()*Math.PI*2, k = dpr / v.dpr;
+    var cs = Math.cos(ang)*k, sn = Math.sin(ang)*k;
+    x.setTransform(cs, sn, -sn, cs, (docX - L)*dpr, (docY - T)*dpr);
+    x.drawImage(v.c, -half * v.dpr, -half * v.dpr);
+    marksLayer.appendChild(c);
+    marks.push({ el: c, born: clock, removeAt: 0 });
+    var live = 0;
+    for (var i = marks.length - 1; i >= 0; i--) {
+      if (marks[i].removeAt) continue;
+      if (++live > MAX_MARKS) fadeMark(marks[i], 1);
+    }
+  }
+  function fadeMark(m, secs) {
+    m.removeAt = clock + secs;
+    m.el.style.setProperty("--cb-fade", secs + "s");
+    m.el.classList.add("__cb_fading");
+  }
+  function updateMarks() {
+    if (clock < marksCheckAt) return;
+    marksCheckAt = clock + 0.5;
+    for (var i = marks.length - 1; i >= 0; i--) {
+      var m = marks[i];
+      if (!m.removeAt) { if (clock - m.born >= MARK_TTL) fadeMark(m, MARK_FADE); }
+      else if (clock >= m.removeAt) { removeNode(m.el); marks.splice(i, 1); }
+    }
+  }
+
   /* ── SOLDIER RAID MODULE ─────────────────────────────────────────────────── */
+  function isGone(el) {
+    return hiddenSet.has(el) || scattered.has(el) || stolenSet.has(el) || !!el.closest("[data-cb-hidden]");
+  }
+
   // True only if the element actually shows something a soldier could carry.
-  function hasVisibleContent(el) {
+  // Uses no innerText (which forces layout); blasted characters don't count.
+  function hasVisibleContent(el, cs) {
     try {
-      var tag = el.tagName;
-      if (tag === "IMG" || tag === "SVG" || tag === "svg" || tag === "VIDEO" ||
-          tag === "CANVAS" || tag === "PICTURE") return true;
-      if (el.querySelector && el.querySelector("img,svg,video,canvas,picture")) return true;
-      if (tag === "INPUT") {
+      var tag = el.localName;
+      if (tag === "img" || tag === "svg" || tag === "video" || tag === "canvas" || tag === "picture") return true;
+      if (el.querySelector("img:not([data-cb-hidden]),svg:not([data-cb-hidden]),video:not([data-cb-hidden]),canvas:not([data-cb-hidden]),picture")) return true;
+      if (tag === "input") {
         var ty = (el.getAttribute("type")||"").toLowerCase();
         if (ty === "submit" || ty === "button" || ty === "image") return true;
         return !!(el.value && el.value.trim());
       }
-      var cs = getComputedStyle(el);
+      cs = cs || getComputedStyle(el);
       if (cs.backgroundImage && cs.backgroundImage !== "none") return true;
-      // innerText ignores visibility:hidden chars (blasted text), so a box whose
-      // text was destroyed reads as empty — soldiers won't target an empty spot.
-      var txt = ((el.innerText != null ? el.innerText : el.textContent) || "").replace(/\s+/g, " ").trim();
-      if (txt.length >= 1 && txt.length <= 200) {
-        // make sure that text is actually painted (not transparent/zero-size font)
-        if (parseFloat(cs.fontSize) >= 6) return true;
-      }
-      return false;
+      var n = visibleTextLength(el, 200);
+      return n >= 1 && n <= 200 && parseFloat(cs.fontSize) >= 6;
     } catch(e) { return false; }
   }
 
@@ -1549,95 +1898,148 @@
   function makeDecoy() {
     var span = document.createElement("div");
     span.textContent = DECOYS[Math.floor(Math.random()*DECOYS.length)];
+    span.setAttribute("data-cb-ui", "1");
     span.style.cssText = [
       "position:fixed;left:0;top:0;width:34px;height:34px;margin:0;",
       "font-size:28px;line-height:34px;text-align:center;",
-      "pointer-events:none;z-index:2147483646;will-change:left,top;",
+      "pointer-events:none;z-index:2147483646;will-change:transform;",
       "filter:drop-shadow(0 2px 3px rgba(0,0,0,0.4));"
     ].join("");
     document.documentElement.appendChild(span);
-    removeList.push(span);
-    return { clone: span, w: 34, h: 34, decoy: true };
+    return { clone: span, w: 34, h: 34, decoy: true, ranges: null };
   }
 
+  /* Loot candidates come from a pool that is rebuilt in small time slices
+     during the read phase (≈1ms per frame), instead of scanning the whole page
+     with getBoundingClientRect/getComputedStyle every time a soldier spawns.
+     Pool entries are stored in page coordinates so scrolling doesn't stale them. */
+  var LOOT_TAGS = { a:1, button:1, img:1, svg:1, h1:1, h2:1, h3:1, h4:1, h5:1, h6:1, input:1, select:1,
+    textarea:1, li:1, td:1, th:1, code:1, pre:1, strong:1, em:1, b:1, i:1, label:1, p:1, span:1,
+    figure:1, video:1, blockquote:1, dt:1, dd:1, summary:1, caption:1, small:1, mark:1, time:1,
+    cite:1, q:1, div:1 };
+  var NO_DESCEND = { svg:1, script:1, style:1, template:1, noscript:1, iframe:1, video:1, canvas:1,
+    select:1, textarea:1, object:1, embed:1, head:1 };
+  var lootPool = [], lootScan = null, lootPoolAt = -1, lootPoolScrollY = 0;
+
+  function lootPoolStale() {
+    return lootPoolAt < 0 || clock - lootPoolAt > 1.5 || Math.abs(scrollY0 - lootPoolScrollY) > viewH * 0.5;
+  }
+  function stepLootScan(budgetMs) {
+    if (!document.body) return;
+    if (!lootScan) {
+      if (!lootPoolStale()) return;
+      lootScan = { next: document.body.firstElementChild, items: [], sy: scrollY0 };
+    }
+    var t0 = performance.now(), n = 0, el = lootScan.next;
+    while (el) {
+      if ((++n & 31) === 0 && performance.now() - t0 > budgetMs) break;
+      var skipKids = considerLoot(el, lootScan.items);
+      el = nextElementInBody(el, skipKids);
+    }
+    lootScan.next = el;
+    if (!el) {
+      lootPool = lootScan.items;
+      lootPoolAt = clock;
+      lootPoolScrollY = lootScan.sy;
+      lootScan = null;
+    }
+  }
+  function nextElementInBody(el, skipKids) {
+    if (!skipKids && el.firstElementChild) return el.firstElementChild;
+    while (el && el !== document.body) {
+      if (el.nextElementSibling) return el.nextElementSibling;
+      el = el.parentElement;
+    }
+    return null;
+  }
+  // Adds el to the pool if it is a visible, carry-sized atom near the viewport.
+  // Returns true when its subtree should be skipped.
+  function considerLoot(el, items) {
+    var tag = el.localName;
+    if (hiddenSet.has(el)) return true;
+    var skip = NO_DESCEND[tag] === 1;
+    if (!LOOT_TAGS[tag] && el.getAttribute("role") !== "button") return skip;
+    if (scattered.has(el) || stolenSet.has(el) || items.length >= 800) return skip;
+    if (el.childElementCount > 6) return skip;          // prefer leaf-ish atoms
+    var r = el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8 || r.width > 420 || r.height > 320) return skip;
+    if (r.bottom < -viewH * 0.5 || r.top > viewH * 1.5 || r.right < 10 || r.left > viewW - 10) return skip;
+    var cs = getComputedStyle(el);
+    if (cs.visibility === "hidden" || cs.display === "none" || parseFloat(cs.opacity) < 0.1) return skip;
+    if (!hasVisibleContent(el, cs)) return skip;
+    items.push({ el: el, x: r.left + scrollX0, y: r.top + scrollY0, w: r.width, h: r.height });
+    return skip;
+  }
+
+  // Picks a random target from the pool (no layout reads).
   function pickLoot() {
-    // Broad sweep: soldiers may grab nearly anything visible — links, images,
-    // headings, list items, table cells, videos, figures, plain divs with text…
-    var sel = "a,button,img,svg,h1,h2,h3,h4,h5,h6,input,select,textarea,li,td,th," +
-              "[role=button],code,pre,strong,em,b,i,label,p,span,figure,video," +
-              "blockquote,dt,dd,summary,caption,small,mark,time,cite,q,div";
-    var all, i;
-    try { all = document.body.querySelectorAll(sel); } catch(e){ return null; }
-    var playBottom = window.innerHeight * PLAY_TOP_FRAC;
+    var playBottom = viewH * PLAY_TOP_FRAC;
     var z = cannonZone();
     var pref = [];  // ideal: real atoms in the top play area
-    var any  = [];  // fallback: any real visible element on the page (so we never decoy when content exists)
-    for (i = 0; i < all.length; i++) {
-      var el = all[i];
-      if (el.closest && el.closest("#__cannon_wrapper")) continue;
-      if (el.dataset && (el.dataset.cbScattered || el.dataset.cbStolen)) continue;
-      if (el.children && el.children.length > 6) continue; // prefer leaf-ish atoms
-      var r = el.getBoundingClientRect();
-      if (r.width < 8 || r.height < 8 || r.width > 420 || r.height > 320) continue;
-      if (r.bottom < 10 || r.top > window.innerHeight-10 || r.right < 10 || r.left > window.innerWidth-10) continue;
-      var cs = getComputedStyle(el);
-      if (cs.visibility === "hidden" || cs.display === "none" || parseFloat(cs.opacity) < 0.1) continue;
-      if (!hasVisibleContent(el)) continue;              // skip empty wrappers / shadows / backgrounds
-      var cx = r.left + r.width/2, cy = r.top + r.height/2;
+    var any  = [];  // fallback: any real visible element on screen
+    for (var i = 0; i < lootPool.length; i++) {
+      var it = lootPool[i], el = it.el;
+      if (!el.isConnected || isGone(el)) continue;
+      var left = it.x - scrollX0, top = it.y - scrollY0;
+      if (top + it.h < 10 || top > viewH - 10 || left + it.w < 10 || left > viewW - 10) continue;
+      var cx = left + it.w/2, cy = top + it.h/2;
       if (Math.hypot(cx - z.x, cy - z.y) < z.r + 20) continue; // unreachable behind the cannon
-      var item = { el: el, cx: cx, cy: cy, w: r.width, h: r.height };
-      if (cy <= playBottom && r.width <= 220 && r.height <= 120) pref.push(item);
+      var item = { el: el, cx: cx, cy: cy, w: it.w, h: it.h };
+      if (cy <= playBottom && it.w <= 220 && it.h <= 120) pref.push(item);
       else any.push(item);
       if (pref.length + any.length > 200) break;
     }
     if (pref.length) return pref[Math.floor(Math.random()*pref.length)];
     if (any.length)  return any[Math.floor(Math.random()*any.length)];
-    return null; // truly nothing on the page → caller falls back to a decoy
+    return null;
   }
 
+  // Returns false when no target is known yet (pool still being built).
   function spawnSoldier(danger) {
-    if (introActive) return;          // no raids until the player starts
+    if (introActive) return true;
     var cap = danger ? DANGER_MAX_SOLDIERS : MAX_SOLDIERS;
-    if (soldiers.length >= cap) return;
+    if (soldiers.length >= cap) return true;
     var loot = pickLoot();
+    if (!loot && (lootScan || lootPoolStale())) return false;
     var tgX, tgY, lootEl = null, wantDecoy = false;
     if (loot) {
       tgX = loot.cx; tgY = loot.cy; lootEl = loot.el;
     } else {
       // Blank page — no real content. Soldier marches to a random spot and grabs a decoy.
       wantDecoy = true;
-      tgX = window.innerWidth  * (0.2 + Math.random()*0.6);
-      tgY = window.innerHeight * (0.18 + Math.random()*0.42);
+      tgX = viewW * (0.2 + Math.random()*0.6);
+      tgY = viewH * (0.18 + Math.random()*0.42);
     }
-    var sideMax = window.innerHeight * PLAY_TOP_FRAC; // how far down the side soldiers may enter
+    var sideMax = viewH * PLAY_TOP_FRAC;
     var sx, sy;
     if (danger) {
       // SWARM: pour in from every edge (the cannon zone still keeps them at bay).
       var dEdge = Math.floor(Math.random()*4);
-      if      (dEdge === 0) { sx = Math.random()*window.innerWidth;   sy = -34; }                    // top
-      else if (dEdge === 1) { sx = -34;                  sy = Math.random()*window.innerHeight*0.95; } // left, full height
-      else if (dEdge === 2) { sx = window.innerWidth+34; sy = Math.random()*window.innerHeight*0.95; } // right, full height
-      else                  { sx = Math.random()*window.innerWidth;   sy = window.innerHeight+34; }    // bottom
+      if      (dEdge === 0) { sx = Math.random()*viewW; sy = -34; }
+      else if (dEdge === 1) { sx = -34;                 sy = Math.random()*viewH*0.95; }
+      else if (dEdge === 2) { sx = viewW+34;            sy = Math.random()*viewH*0.95; }
+      else                  { sx = Math.random()*viewW; sy = viewH+34; }
     } else {
       // Normal: only from the front — top edge, or upper part of the side edges.
       var edge = Math.floor(Math.random()*3);
-      if      (edge === 0) { sx = tgX;                   sy = -34; }                              // top
-      else if (edge === 1) { sx = -34;                   sy = -20 + Math.random()*(sideMax+20); } // left (upper 70%)
-      else                 { sx = window.innerWidth+34;  sy = -20 + Math.random()*(sideMax+20); } // right (upper 70%)
+      if      (edge === 0) { sx = tgX;      sy = -34; }
+      else if (edge === 1) { sx = -34;      sy = -20 + Math.random()*(sideMax+20); }
+      else                 { sx = viewW+34; sy = -20 + Math.random()*(sideMax+20); }
     }
     soldiers.push({
       state: "approach", x: sx, y: sy,
-      tgX: tgX, tgY: tgY, lootEl: lootEl, wantDecoy: wantDecoy,
+      tgX: tgX, tgY: tgY, lootEl: lootEl, wantDecoy: wantDecoy, tRect: null, targetBad: false,
       speed: (danger ? 82 : 64) + Math.random()*46, facing: 1, phase: Math.random()*6,
-      grabTimer: 0, loot: null, taunt: null, tauntT: 0,
+      grabTimer: 0, loot: null, taunt: null, tauntT: 0, retargetCd: 0.25,
       color: CAMO[Math.floor(Math.random()*CAMO.length)]
     });
+    return true;
   }
 
   // Forbidden circle around the cannon (bottom-center) — soldiers never enter it.
   function cannonZone() {
-    var r = Math.max(150, Math.min(window.innerWidth, window.innerHeight) * 0.30);
-    return { x: window.innerWidth/2, y: window.innerHeight + 12, r: r };
+    var r = Math.max(150, Math.min(viewW, viewH) * 0.30);
+    return { x: viewW/2, y: viewH + 12, r: r };
   }
 
   function moveToward(s, tx, ty, dt) {
@@ -1645,7 +2047,6 @@
     var step = s.speed * dt;
     if (d > step) { s.x += dx/d*step; s.y += dy/d*step; }
     else          { s.x = tx; s.y = ty; }
-    // Keep clear of the cannon: push back out to the zone boundary if breached.
     var z = cannonZone();
     var zx = s.x - z.x, zy = s.y - z.y, zd = Math.hypot(zx, zy);
     if (zd < z.r) {
@@ -1660,11 +2061,11 @@
 
   // Flee only through the top / left / right edges — never down past the cannon.
   function nearestEdgeExit(s) {
-    var dl = s.x, dr = window.innerWidth - s.x, dtop = s.y;
+    var dl = s.x, dr = viewW - s.x, dtop = s.y;
     var m = Math.min(dl, dr, dtop);
-    if (m === dtop) return { x: s.x,                  y: -40 };
-    if (m === dl)   return { x: -40,                  y: Math.min(s.y, window.innerHeight*0.6) };
-    return                 { x: window.innerWidth+40,  y: Math.min(s.y, window.innerHeight*0.6) };
+    if (m === dtop) return { x: s.x,      y: -40 };
+    if (m === dl)   return { x: -40,      y: Math.min(s.y, viewH*0.6) };
+    return                 { x: viewW+40, y: Math.min(s.y, viewH*0.6) };
   }
 
   var TAUNTS = ["Yoink! 😝","Mine now! 🤣","Too slow! 🐌","Thanks! 😜","Bye-bye! 👋","Ha-ha! 🤪","Free stuff! 🤑","Easy! 😎","Can't catch me! 🏃","Sooo shiny! ✨"];
@@ -1673,53 +2074,32 @@
     s.tauntT = 2.4;
   }
 
-  function soldierGrab(s) {
-    var el = s.lootEl;
-    var invalid = !el || !el.parentNode ||
-        (el.dataset && (el.dataset.cbScattered || el.dataset.cbStolen)) ||
-        !hasVisibleContent(el);
-    // Decoy ONLY when this soldier was spawned on a blank page. Otherwise, if its
-    // target vanished, retarget to another real element before conjuring a decoy.
-    if (s.wantDecoy) { s.loot = makeDecoy(); return; }
-    if (invalid) {
-      var repl = pickLoot();
-      if (repl) { el = s.lootEl = repl.el; }
-      else { s.loot = makeDecoy(); return; }
-    }
-    var rect = el.getBoundingClientRect();
-    if (rect.width < 5 || rect.height < 5) {
-      var repl2 = pickLoot();
-      if (repl2) { el = s.lootEl = repl2.el; rect = el.getBoundingClientRect(); }
-      else { s.loot = makeDecoy(); return; }
-    }
-    if (el.dataset) el.dataset.cbStolen = "1";
-    restoreList.push({ el: el, prop: "visibility", value: el.style.visibility });
+  function retarget(s) {
+    var np = pickLoot();
+    if (np) { s.lootEl = np.el; s.tgX = np.cx; s.tgY = np.cy; s.tRect = null; s.targetBad = false; s.state = "approach"; return true; }
+    return false;
+  }
 
-    var clone = el.cloneNode(true);
-    clone.removeAttribute("id");
-    clone.style.position = "fixed";
-    clone.style.left = "0px"; clone.style.top = "0px";
-    clone.style.width = rect.width + "px";
-    clone.style.height = rect.height + "px";
-    clone.style.margin = "0";
-    clone.style.transform = "none";
-    clone.style.transition = "none";
-    clone.style.pointerEvents = "none";
-    clone.style.zIndex = "2147483646";
-    clone.style.willChange = "left,top";
-    document.documentElement.appendChild(clone);
-    removeList.push(clone);
-    el.style.visibility = "hidden";
-    s.loot = { clone: clone, w: rect.width, h: rect.height };
+  // Uses the rect read for this soldier's target in the read phase.
+  function soldierGrab(s) {
+    if (s.wantDecoy) { s.loot = makeDecoy(); return; }
+    var el = s.lootEl, rect = s.tRect;
+    if (!el || !el.isConnected || isGone(el) || s.targetBad || !rect || rect.width < 5 || rect.height < 5) {
+      if (!retarget(s)) s.loot = makeDecoy();
+      return;
+    }
+    stolenSet.add(el);
+    var c = cloneForFlight(el, 0, 0, rect.width, rect.height);
+    hideEl(el);
+    s.loot = { clone: c.el, w: rect.width, h: rect.height, ranges: c.ranges };
   }
 
   function positionLoot(s) {
     if (!s.loot) return;
-    var c = s.loot.clone;
-    c.style.left = (s.x - s.loot.w/2).toFixed(1) + "px";
-    c.style.top  = (s.y - 46 - s.loot.h).toFixed(1) + "px";
+    var x = s.x - s.loot.w/2, y = s.y - 46 - s.loot.h;
     // cheeky wobble while carried overhead
-    c.style.transform = "rotate(" + (Math.sin(clock*9 + s.phase)*7).toFixed(1) + "deg)";
+    s.loot.clone.style.transform = "translate3d(" + x.toFixed(1) + "px," + y.toFixed(1) + "px,0) rotate(" +
+      (Math.sin(clock*9 + s.phase)*7).toFixed(1) + "deg)";
   }
 
   function killSoldier(s) {
@@ -1736,13 +2116,13 @@
     }
     shockwaves.push({x:s.x,y:s.y-20,r:0,maxR:34,life:0.16,maxLife:0.16,w:2,color:"255,210,120"});
     if (s.loot && s.loot.clone) {
-      var c = s.loot.clone;
-      var lx = s.x - s.loot.w/2, ly = s.y - 46 - s.loot.h;
-      c.style.left = lx + "px"; c.style.top = ly + "px";
-      var ccx = lx + s.loot.w/2, ccy = ly + s.loot.h/2;
-      shards.push({ el:c, x:ccx, y:ccy, ox:ccx, oy:ccy,
+      // The carried loot drops and tumbles away. It keeps left/top 0 and stays
+      // positioned by transform only (no layout change, so no layout shift).
+      var lw = s.loot.w, lh = s.loot.h;
+      var ccx = s.x, ccy = s.y - 46 - lh/2;
+      flung.push({ el:s.loot.clone, ranges:s.loot.ranges, x:ccx, y:ccy, ox:lw/2, oy:lh/2,
         vx:(Math.random()-0.5)*180, vy:-150-Math.random()*100,
-        rotation:0, rotSpeed:(Math.random()-0.5)*300, life:1.6+Math.random()*0.6, fade:0.4 });
+        rotation:0, rotSpeed:(Math.random()-0.5)*300, life:1.6+Math.random()*0.6, fade:0.4, fading:false });
       s.loot = null;
     }
     // Ragdoll death animation: pop up, get knocked back, topple and fade out.
@@ -1759,15 +2139,33 @@
 
   function escapeSoldier(s) {
     // Soldier got away — loot stays stolen (original hidden); remove the carried clone.
-    if (s.loot && s.loot.clone && s.loot.clone.parentNode) {
-      s.loot.clone.parentNode.removeChild(s.loot.clone);
-    }
+    if (s.loot) { removeNode(s.loot.clone); dropRanges(s.loot.ranges); }
     s.loot = null;
     stolen++;
-    var fx = Math.max(30, Math.min(window.innerWidth-30, s.x));
-    var fy = Math.max(40, Math.min(window.innerHeight-40, s.y));
+    var fx = Math.max(30, Math.min(viewW-30, s.x));
+    var fy = Math.max(40, Math.min(viewH-40, s.y));
     spawnFloater(fx, fy, "😡 GOT AWAY!", "#ff5544", 16);
     renderHUD();
+  }
+
+  // READ phase: refresh target rects (so soldiers follow scrolling content)
+  // and re-validate targets every 0.25s.
+  function readSoldiers(dt) {
+    for (var i = 0; i < soldiers.length; i++) {
+      var s = soldiers[i];
+      if ((s.state !== "approach" && s.state !== "grab") || s.wantDecoy || !s.lootEl) { s.tRect = null; continue; }
+      var el = s.lootEl;
+      if (s.state === "approach") {
+        s.retargetCd -= dt;
+        if (s.retargetCd <= 0) {
+          s.retargetCd = 0.25;
+          s.targetBad = !el.isConnected || isGone(el) || !hasVisibleContent(el);
+        }
+        if (!el.isConnected || isGone(el)) { s.tRect = null; continue; }
+      } else if (!el.isConnected) { s.tRect = null; continue; }
+      var r = el.getBoundingClientRect();
+      s.tRect = (r.width >= 2 && r.height >= 2) ? r : null;
+    }
   }
 
   function updateSoldiers(dt) {
@@ -1778,9 +2176,10 @@
     soldierTimer -= dt;
     if (soldierTimer <= 0) {
       soldierTimer = interval * (0.6 + Math.random()*0.6);
-      // In danger mode spawn a burst from several directions at once.
-      var burst = danger ? (2 + Math.floor(Math.random()*3)) : NORMAL_BURST; // normal: 2 at a time
-      for (var b = 0; b < burst && soldiers.length < cap; b++) spawnSoldier(danger);
+      var burst = danger ? (2 + Math.floor(Math.random()*3)) : NORMAL_BURST;
+      for (var b = 0; b < burst && soldiers.length < cap; b++) {
+        if (!spawnSoldier(danger)) { soldierTimer = 0.15; break; }   // targets not known yet — retry shortly
+      }
     }
     for (var i = soldiers.length-1; i >= 0; i--) {
       var s = soldiers[i];
@@ -1797,19 +2196,10 @@
       if (s.state === "approach") {
         // If a blast removed/scattered our target while marching, retarget to a
         // real visible element (or retreat) — never walk to an empty spot.
-        if (!s.wantDecoy) {
-          s.retargetCd = (s.retargetCd || 0) - dt;
-          if (s.retargetCd <= 0) {
-            s.retargetCd = 0.25;
-            var le = s.lootEl;
-            var bad = !le || !le.parentNode || (le.dataset && (le.dataset.cbScattered || le.dataset.cbStolen)) || !hasVisibleContent(le);
-            if (bad) {
-              var np = pickLoot();
-              if (np) { s.lootEl = np.el; s.tgX = np.cx; s.tgY = np.cy; }
-              else { s.exitX = nearestEdgeExit(s).x; s.exitY = nearestEdgeExit(s).y; s.state = "flee"; continue; }
-            }
-          }
+        if (!s.wantDecoy && s.targetBad) {
+          if (!retarget(s)) { var ex0 = nearestEdgeExit(s); s.exitX = ex0.x; s.exitY = ex0.y; s.state = "flee"; continue; }
         }
+        if (s.tRect) { s.tgX = s.tRect.left + s.tRect.width/2; s.tgY = s.tRect.top + s.tRect.height/2; }
         var d = moveToward(s, s.tgX, s.tgY, dt);
         if (d < 10) { s.state = "grab"; s.grabTimer = 0.9; } // long enough for the victory dance
       } else if (s.state === "grab") {
@@ -1818,13 +2208,13 @@
           soldierGrab(s);
           if (s.loot) soldierTaunt(s);   // cheeky speech bubble the moment it's grabbed
         }
-        if (s.grabTimer <= 0) {
+        if (s.state === "grab" && s.grabTimer <= 0) {
           var ex = nearestEdgeExit(s);
           s.exitX = ex.x; s.exitY = ex.y; s.state = "flee";
         }
       } else if (s.state === "flee") {
         moveToward(s, s.exitX, s.exitY, dt);
-        if (s.x < -36 || s.x > window.innerWidth+36 || s.y < -36 || s.y > window.innerHeight+36) {
+        if (s.x < -36 || s.x > viewW+36 || s.y < -36 || s.y > viewH+36) {
           escapeSoldier(s);
           soldiers.splice(i, 1);
           continue;
@@ -1840,10 +2230,8 @@
     for (var i = 0; i < soldiers.length; i++) {
       var s = soldiers[i];
       if (s.state !== "approach" && s.state !== "grab") continue;
-      var el = s.lootEl;
-      if (!el || !el.parentNode) continue;
-      var r = el.getBoundingClientRect();
-      if (r.width < 2 || r.height < 2) continue;
+      var r = s.tRect;
+      if (!r) continue;
       var x = r.left-4, y = r.top-4, w = r.width+8, h = r.height+8;
       ctx.save();
       ctx.lineWidth = 2;
@@ -1852,7 +2240,6 @@
       ctx.strokeStyle = "rgba(255,70,55," + (0.55 + 0.4*pulse) + ")";
       ctx.strokeRect(x, y, w, h);
       ctx.setLineDash([]);
-      // corner brackets
       var c = 7;
       ctx.strokeStyle = "rgba(255,120,90," + (0.7 + 0.3*pulse) + ")";
       ctx.lineWidth = 2.5;
@@ -1862,7 +2249,6 @@
       ctx.moveTo(x+w, y+h-c); ctx.lineTo(x+w, y+h); ctx.lineTo(x+w-c, y+h);
       ctx.moveTo(x+c, y+h); ctx.lineTo(x, y+h); ctx.lineTo(x, y+h-c);
       ctx.stroke();
-      // tiny tag
       var label = s.state === "grab" ? "STEALING" : "TARGET";
       ctx.font = "700 9px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
       var tw = ctx.measureText(label).width + 8;
@@ -1879,7 +2265,6 @@
   // Draws a soldier centered so feet rest at (0,0); caller sets transform/facing.
   function drawSoldierBody(s, legSwing, armSwing, dead) {
     var skin = "#d2a877", boot = "#23291a", dark = "#2c3522";
-    // shadow (skip when dead/airborne)
     if (!dead) {
       ctx.fillStyle = "rgba(0,0,0,0.16)";
       ctx.beginPath(); ctx.ellipse(0, 1, 11, 3, 0, 0, Math.PI*2); ctx.fill();
@@ -1930,7 +2315,6 @@
     ctx.fillStyle = skin;
     ctx.fillRect(-1.6,-31,3.2,3);
     ctx.beginPath(); ctx.arc(0, -34, 4.6, 0, Math.PI*2); ctx.fill();
-    // eyes
     if (dead) {
       ctx.strokeStyle = "#3a2a1a"; ctx.lineWidth = 1.1;
       ctx.beginPath();
@@ -1956,7 +2340,7 @@
       if (s.state === "dead") {
         var p = s.deadTimer / s.deadDur;
         ctx.save();
-        ctx.globalAlpha = Math.max(0, 1 - p*p);          // fade out toward the end
+        ctx.globalAlpha = Math.max(0, 1 - p*p);
         ctx.translate(s.x, s.y);
         ctx.rotate(s.rot * Math.PI/180);
         ctx.scale(f, 1);
@@ -1966,7 +2350,7 @@
         ctx.save();
         ctx.globalAlpha = Math.max(0, 1 - p);
         var hx = s.x + s.dvx*0.5*p*1.2;
-        var hy = s.y - 34 - 120*p + 260*p*p;             // up then down
+        var hy = s.y - 34 - 120*p + 260*p*p;
         ctx.translate(hx, hy);
         ctx.rotate((s.rot*1.6) * Math.PI/180);
         ctx.fillStyle = "#37432a";
@@ -2001,8 +2385,8 @@
   // Cheeky speech bubble that follows a soldier for a couple of seconds.
   function renderTauntBubble(s) {
     if (!s.taunt || s.tauntT <= 0) return;
-    var a = Math.min(1, s.tauntT / 0.4);          // quick fade at the end
-    var pop = s.tauntT > 2.15 ? 1 + (2.4 - s.tauntT)*2 : 1; // pop-in scale
+    var a = Math.min(1, s.tauntT / 0.4);
+    var pop = s.tauntT > 2.15 ? 1 + (2.4 - s.tauntT)*2 : 1;
     var bx = s.x + s.facing*30, by = s.y - 64 - (s.loot ? s.loot.h : 0);
     by = Math.max(20, by);
     ctx.save();
@@ -2010,13 +2394,12 @@
     ctx.font = "700 11px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
     var tw = ctx.measureText(s.taunt).width;
     var w = tw + 14, h = 20;
-    bx = Math.max(w/2 + 4, Math.min(window.innerWidth - w/2 - 4, bx));
+    bx = Math.max(w/2 + 4, Math.min(viewW - w/2 - 4, bx));
     ctx.translate(bx, by); ctx.scale(pop, pop); ctx.translate(-bx, -by);
     ctx.fillStyle = "rgba(255,255,255,0.97)";
     ctx.strokeStyle = "rgba(0,0,0,0.55)"; ctx.lineWidth = 1.4;
     roundRectPath(bx - w/2, by - h/2, w, h, 9);
     ctx.fill(); ctx.stroke();
-    // little tail pointing at the soldier
     ctx.beginPath();
     ctx.moveTo(bx - s.facing*6, by + h/2 - 1);
     ctx.lineTo(bx - s.facing*14, by + h/2 + 8);
@@ -2038,24 +2421,63 @@
     ctx.closePath();
   }
 
-  /* ── GAME LOOP ───────────────────────────────────────────────────────────── */
+  /* ── GAME LOOP ───────────────────────────────────────────────────────────────
+     1. READ   — every layout read of the frame (scroll, blast hit-tests and
+                 measurements, soldier targets, a slice of the loot scan).
+     2. WRITE  — DOM writes (blasted elements/text, barrel angle).
+     3. SIMULATE + RENDER — physics and canvas drawing; DOM writes here are
+                 transforms/new overlay nodes only, never followed by reads. */
+  function readPhase(dt) {
+    scrollX0 = window.scrollX;
+    scrollY0 = window.scrollY;
+    var de = document.documentElement;
+    docW = Math.max(de.scrollWidth, viewW);
+    docH = Math.max(de.scrollHeight, viewH);
+    for (var j = 0; j < 2 && blastQueue.length; j++) blastResults.push(readBlast(blastQueue.shift()));
+    readSoldiers(dt);
+    if (!introActive) stepLootScan(blastResults.length ? 0.5 : 1.0);
+  }
+
+  function writePhase() {
+    var results = blastResults;
+    blastResults = [];
+    for (var i = 0; i < results.length; i++) applyBlast(results[i]);
+    writeBarrel();
+  }
+
+  // One frame of the game. An unexpected error on an unusual page is logged
+  // once and the game keeps running instead of freezing.
+  var loopErrorLogged = false;
   function gameLoop(ts) {
     if (!gameActive) return;
-    var dt = Math.min((ts-lastTime)/1000, 0.05);
+    animId = requestAnimationFrame(gameLoop);
+    try {
+      frame(ts);
+    } catch (e) {
+      if (!loopErrorLogged) { loopErrorLogged = true; console.error("[BlastBlastBlast]", e); }
+    }
+  }
+
+  function frame(ts) {
+    var dt = Math.max(0, Math.min((ts-lastTime)/1000, 0.05));
     lastTime = ts;
     clock += dt;
-    applyAim();                 // compute barrel/trajectory once per frame (decoupled from mousemove)
+    readPhase(dt);
+    applyAim();                 // barrel/trajectory once per frame (decoupled from pointermove)
     updateGunAutoFire(dt);      // hold-to-fire: stream bullets while pointer held in gun mode
-    processScatterQueue();      // at most one heavy DOM-scatter pass per frame
-    applyShake(dt);             // decaying, non-stacking screen shake
-    ctx.clearRect(0,0,window.innerWidth,window.innerHeight);
+    writePhase();
+    applyShake(dt);
+    ctx.clearRect(0, 0, viewW, viewH);
     updateBalls(dt);
     updateBullets(dt);
     updateBlood(dt);
     updateParticles(dt);
-    updateShards(dt);
+    updateDebris(dt);
+    updateFlung(dt);
     updateSoldiers(dt);
+    updateMarks();
     renderCraters();
+    renderDebris();
     renderBlood();
     renderTrajectoryPreview();
     renderLootTargets();
@@ -2065,26 +2487,31 @@
     renderGunReticle();
     renderParticles();
     renderFloaters();
-    animId = requestAnimationFrame(gameLoop);
   }
+
+  /* ── START ───────────────────────────────────────────────────────────────── */
+  document.documentElement.appendChild(wrapper);
+  removeList.push(wrapper);
+  resizeCanvas();
+  renderHUD();
+  loadBest();
+  maybeShowIntro();
+  // Keys must reach the page, not an embedded frame that had focus.
+  try {
+    var ae = document.activeElement;
+    if (ae && /^(iframe|frame|embed|object)$/.test(ae.localName)) ae.blur();
+  } catch (e) {}
   animId = requestAnimationFrame(gameLoop);
 
-  /* ── MISC EVENTS ─────────────────────────────────────────────────────────── */
+  /* ── EVENTS ──────────────────────────────────────────────────────────────── */
   function onResize() { resizeCanvas(); }
   window.addEventListener("resize", onResize);
   function onEscKey(e){ if (e.key === "Escape" || e.keyCode === 27) destroy(); }
   window.addEventListener("keydown", onEscKey, true);
-  document.addEventListener("keydown", onEscKey, true);
 
-  // Pointer move only records the cursor; the actual aim math runs once per
-  // frame in applyAim() so fast mouse movement can't thrash layout / jank.
+  // Pointer move only records the cursor; the aim math runs once per frame.
   function onGlobalMove(e) { mouseX = e.clientX; mouseY = e.clientY; }
   window.addEventListener("pointermove", onGlobalMove, true);
-
-  function applyAim() {
-    if (mode === "cannon") updateCannonAimTo(mouseX, mouseY);
-    else                   aimBarrelToward(mouseX, mouseY);
-  }
 
   // BOTH MODES: intercept clicks anywhere so the page never reacts; each click fires.
   function isOwnUI(e) { return e.target && e.target.closest && e.target.closest("[data-cb-ui]"); }
@@ -2093,7 +2520,7 @@
     e.preventDefault(); e.stopImmediatePropagation();
     beginFire(e.clientX, e.clientY);
   }
-  function onFirePointerUp(e) { endFire(); }
+  function onFirePointerUp() { endFire(); }
   function onClickBlock(e) {
     if (isOwnUI(e)) return;
     e.preventDefault(); e.stopImmediatePropagation();
@@ -2105,61 +2532,18 @@
   window.addEventListener("mousedown",  onClickBlock, true);
   window.addEventListener("click",      onClickBlock, true);
   window.addEventListener("contextmenu", onClickBlock, true);
+  window.addEventListener("pagehide",   flushBest, true);
 
-  /* ── IFRAME BRIDGE (top frame) ─────────────────────────────────────────────
-     Receives pointer coords forwarded up from sub-frames (already translated
-     into this frame's coordinate space, one hop per call) and feeds them into
-     the game so aiming/firing work while the cursor is over an iframe. */
-  function cbTopChildOffset(src) {
-    var ifr = document.getElementsByTagName("iframe");
-    for (var i = 0; i < ifr.length; i++) {
-      var w = null; try { w = ifr[i].contentWindow; } catch (e2) {}
-      if (w && w === src) {
-        var r = ifr[i].getBoundingClientRect();
-        return { x: r.left + (ifr[i].clientLeft || 0), y: r.top + (ifr[i].clientTop || 0) };
-      }
-    }
-    return null;
-  }
-  function onFrameMessage(e) {
-    var d = e.data;
-    if (!d || !d.__cbFrame) return;
-    if (d.kind === "escape") { destroy(); return; }
-    var off = cbTopChildOffset(e.source);
-    if (!off) return;
-    var x = d.x + off.x, y = d.y + off.y;
-    mouseX = x; mouseY = y;        // aim is applied once per frame in applyAim()
-    if (d.kind === "down") beginFire(x, y);
-    else if (d.kind === "up") endFire();
-  }
-  window.addEventListener("message", onFrameMessage, true);
-
-  // Tell every sub-frame the game is active + which weapon mode is current.
-  // Re-broadcast periodically so iframes that load late also get wired up.
-  function broadcastControl() {
-    var msg = { __cbControl: true, active: gameActive, mode: mode };
-    var ifr = document.getElementsByTagName("iframe");
-    for (var i = 0; i < ifr.length; i++) {
-      try { ifr[i].contentWindow.postMessage(msg, "*"); } catch (e) {}
-    }
-  }
-  var cbBroadcastTimer = setInterval(broadcastControl, 1000);
-  broadcastControl();
-
-  /* ── TEARDOWN ────────────────────────────────────────────────────────────── */
+  /* ── TEARDOWN — restores the page completely ─────────────────────────────── */
   function destroy() {
     if (!gameActive) return;
     gameActive = false;
     gunHeld = false;
-    broadcastControl();                 // tell sub-frames to stop forwarding/blocking
-    if (cbBroadcastTimer) clearInterval(cbBroadcastTimer);
     if (animId) cancelAnimationFrame(animId);
-    soldiers.length = 0;
-    bullets.length = 0;
-    bloodDrops.length = 0;
+    flushBest();
+    clearTimeout(vigOffTimer);
     window.removeEventListener("resize", onResize);
     window.removeEventListener("keydown", onEscKey, true);
-    document.removeEventListener("keydown", onEscKey, true);
     window.removeEventListener("pointermove", onGlobalMove, true);
     window.removeEventListener("pointerdown", onFirePointerDown, true);
     window.removeEventListener("pointerup",   onFirePointerUp, true);
@@ -2168,40 +2552,29 @@
     window.removeEventListener("mousedown",  onClickBlock, true);
     window.removeEventListener("click",      onClickBlock, true);
     window.removeEventListener("contextmenu", onClickBlock, true);
-    window.removeEventListener("message", onFrameMessage, true);
-    document.documentElement.style.cursor = "";
-    shakeTimers.forEach(function(t){ clearTimeout(t); });
-    markTimers.forEach(function(t){ clearTimeout(t); });
-    document.documentElement.style.transform = "";
+    window.removeEventListener("pagehide",   flushBest, true);
+    restoreCursor();
 
-    for (var i=0; i<restoreList.length; i++) {
-      var entry = restoreList[i];
-      try {
-        if (entry.prop === "visibility") {
-          entry.el.style.visibility = entry.value || "";
-        } else if (entry.prop === "cbDone") {
-          delete entry.el.dataset.cbDone;
-        } else if (entry.type === "textnode") {
-          // Restore: replace our per-char spans with the original text node
-          var par2 = entry.parent;
-          var firstSpan = entry.spans[0];
-          if (firstSpan && firstSpan.parentNode === par2) {
-            var restored = document.createTextNode(entry.origText);
-            par2.insertBefore(restored, firstSpan);
-            for (var si2 = 0; si2 < entry.spans.length; si2++) {
-              try { par2.removeChild(entry.spans[si2]); } catch(e5){}
-            }
-          }
-        }
-      } catch(e2) {}
-    }
-    for (var j=0; j<removeList.length; j++) {
-      try { if(removeList[j].parentNode) removeList[j].parentNode.removeChild(removeList[j]); } catch(e3){}
-    }
-    for (var k=0; k<shards.length; k++) {
-      try { if(shards[k].el.parentNode) shards[k].el.parentNode.removeChild(shards[k].el); } catch(e4){}
-    }
-    if (wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+    // Blasted text: drop the highlight (or undo the fallback spans).
+    try { if (hl) CSS.highlights.delete(HL_NAME); } catch (e) {}
+    hl = null;
+    for (var c = fbCreated.length - 1; c >= 0; c--) removeNode(fbCreated[c]);
+    fbOriginal.forEach(function (data, node) { node.data = data; });
+
+    // Hidden / flung / shattered / stolen elements come back.
+    for (var i = 0; i < hiddenList.length; i++) hiddenList[i].removeAttribute("data-cb-hidden");
+    var left = document.querySelectorAll("[data-cb-hidden]");
+    for (var l = 0; l < left.length; l++) left[l].removeAttribute("data-cb-hidden");
+
+    // Our own nodes: flying clones, carried loot, marks, overlay, styles.
+    for (var f = 0; f < flung.length; f++) removeNode(flung[f].el);
+    for (var s = 0; s < soldiers.length; s++) if (soldiers[s].loot) removeNode(soldiers[s].loot.clone);
+    for (var r = 0; r < removeList.length; r++) removeNode(removeList[r]);
+    flung.length = soldiers.length = bullets.length = bloodDrops.length = debris.length = marks.length = 0;
+    hiddenList.length = removeList.length = fbCreated.length = 0;
+    fbOriginal.clear();
+    lootPool = []; lootScan = null;
+
     window.__cannonBlastActive = false;
     delete window.__cannonBlastDestroy;
   }
