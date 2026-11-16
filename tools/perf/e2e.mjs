@@ -2,8 +2,10 @@
 // End-to-end check with the real unpacked extension and Chrome's real
 // permission model: loads the extension, "clicks" the toolbar icon
 // (Extensions.triggerAction → activeTab), presses Launch in the real popup,
-// plays a little, then Remove. Also checks restricted pages and PDFs, and
-// whether clicks over a cross-origin iframe reach the game.
+// plays a little, then Remove. Presses the real launch shortcut (a Chrome
+// extension command, which grants activeTab the same way). Also checks
+// restricted pages, PDFs and SVG files, and whether clicks over a
+// cross-origin iframe reach the game. Chrome runs muted.
 // Dev-only; not part of the extension.
 //
 //   node tools/perf/e2e.mjs [--ext <dir>]     (default: the repository root)
@@ -25,7 +27,7 @@ function launchPiped() {
     "--headless=new", "--remote-debugging-pipe", "--enable-unsafe-extension-debugging",
     `--user-data-dir=${userDataDir}`, "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
-    "--window-size=1280,800", "about:blank",
+    "--mute-audio", "--window-size=1280,800", "about:blank",
   ], { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
   const out = proc.stdio[3], inp = proc.stdio[4];
   let nextId = 0, pending = new Map(), listeners = [], chunks = [];
@@ -71,6 +73,7 @@ async function waitFor(fn, ms = 5000) {
 
 async function openTab(b, url) {
   const { targetId } = await b.send("Target.createTarget", { url });
+  await b.send("Target.activateTarget", { targetId });   // bring it to the front, like a user switching tabs
   const { sessionId } = await b.send("Target.attachToTarget", { targetId, flatten: true });
   await b.send("Page.enable", {}, sessionId);
   await b.send("Runtime.enable", {}, sessionId);
@@ -108,6 +111,30 @@ async function tabKey(b, tab, digit) {
 }
 const arsenalLabel = (b, tab) => evaluate(b, tab.sessionId,
   `(function(){ var a = document.getElementById("__cb_arsenal"); return a ? a.firstChild.textContent : null; })()`);
+
+// The launch shortcut as Chrome sees it: Alt (Option on Mac) + Shift + X.
+async function pressShortcut(b, tab) {
+  for (const type of ["rawKeyDown", "keyUp"]) {
+    await b.send("Input.dispatchKeyEvent", { type, modifiers: 1 | 8, key: "X", code: "KeyX", windowsVirtualKeyCode: 88, nativeVirtualKeyCode: 88 }, tab.sessionId);
+  }
+}
+
+async function tabEscape(b, tab) {
+  for (const type of ["rawKeyDown", "keyUp"]) {
+    await b.send("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, tab.sessionId);
+  }
+}
+
+// Evaluates in the extension's service worker.
+async function swEval(b, extId, expression) {
+  const sw = (await b.send("Target.getTargets")).targetInfos.find((t) => t.type === "service_worker" && t.url.startsWith("chrome-extension://" + extId));
+  if (!sw) throw new Error("service worker not running");
+  const { sessionId } = await b.send("Target.attachToTarget", { targetId: sw.targetId, flatten: true });
+  const r = await b.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
+  await b.send("Target.detachFromTarget", { sessionId }).catch(() => {});
+  if (r.exceptionDetails) throw new Error(r.exceptionDetails.text);
+  return r.result.value;
+}
 
 async function tabClick(b, tab, x, y) {
   for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
@@ -153,13 +180,18 @@ async function main() {
     const m1 = await evaluate(b, tab.sessionId, countMarks);
     record("Click over a cross-origin iframe fires the cannon", m1 > m0, `marks ${m0} → ${m1}`);
 
-    // Remove from the popup restores the page.
-    await evaluate(b, popup.sessionId, `document.getElementById("launchBtn").click()`);
-    await sleep(500);
+    // Remove from the popup restores the page and (after playing) shows the
+    // blast report; the popup closes so the report is visible.
+    await evaluate(b, popup.sessionId, `document.getElementById("launchBtn").click()`).catch(() => {});
+    await sleep(700);
     const left = await evaluate(b, tab.sessionId, `document.querySelectorAll("#__cannon_wrapper,#__cb_styles,[data-cb-hidden]").length`);
-    st = await popupState(b, popup);
-    record("Remove tears the game down", left === 0 && /Launch/.test(st.label), `${left} leftover node(s); ${st.status}`);
-    await b.send("Target.closeTarget", { targetId: popup.targetId }).catch(() => {});
+    const reportShown = await evaluate(b, tab.sessionId, `!!document.getElementById("__cb_report")`);
+    const popupOpen = (await b.send("Target.getTargets")).targetInfos.some((t) => t.targetId === popup.targetId);
+    record("Remove restores the page, shows the blast report and closes the popup", left === 0 && reportShown && !popupOpen,
+      `${left} leftover node(s), report shown: ${reportShown}, popup open: ${popupOpen}`);
+    if (popupOpen) await b.send("Target.closeTarget", { targetId: popup.targetId }).catch(() => {});
+    await tabEscape(b, tab);
+    await sleep(400);
 
     // Relaunch on the same page via a fresh popup.
     popup = await openPopup(b, extId, tab);
@@ -184,6 +216,45 @@ async function main() {
       record("Rockets locked for new players, unlocked at 10 points", /CANNON/.test(locked) && /ROCKETS/.test(unlocked), `${locked} → ${unlocked}`);
     }
     await b.send("Target.closeTarget", { targetId: popup.targetId }).catch(() => {});
+
+    // The launch shortcut: a real Chrome extension command.
+    const cmds = await swEval(b, extId, "chrome.commands.getAll()");
+    const cmd = cmds.find((c) => c.name === "toggle-game");
+    record("Launch shortcut is registered", !!(cmd && cmd.shortcut), cmd ? `${cmd.shortcut} — ${cmd.description}` : "missing");
+    const t2 = await openTab(b, `${server.origin}/heavy.html`);
+    await pressShortcut(b, t2);
+    await sleep(1200);
+    const viaKey = await evaluate(b, t2.sessionId, `!!document.getElementById("__cannon_wrapper")`);
+    record("Shortcut launches the game on a new page (activeTab, no popup)", viaKey);
+    await tabClick(b, t2, 520, 300);
+    await sleep(1700);
+    await pressShortcut(b, t2);
+    await sleep(800);
+    const viaKeyOff = await evaluate(b, t2.sessionId, `({ game: !!document.getElementById("__cannon_wrapper"),
+      report: (function(){ var h = document.getElementById("__cb_report"); return h ? h.shadowRoot.textContent : ""; })() })`);
+    record("Shortcut again removes it and shows the blast report (with the shortcut)", !viaKeyOff.game && /BLAST REPORT/.test(viaKeyOff.report) && viaKeyOff.report.includes(cmd.shortcut),
+      Array.from(viaKeyOff.report.replace(/\s+/g, " ")).slice(0, 80).join("") + "…");
+    await tabEscape(b, t2);
+
+    // The shortcut on a page Chrome protects explains why instead of failing silently.
+    const t3 = await openTab(b, "chrome://version/");
+    const before = new Set((await b.send("Target.getTargets")).targetInfos.map((t) => t.targetId));
+    await pressShortcut(b, t3);
+    await sleep(1500);
+    const pop = (await b.send("Target.getTargets")).targetInfos.find((t) => !before.has(t.targetId) && t.url.includes("popup.html"));
+    let how = "";
+    if (pop) {
+      const { sessionId } = await b.send("Target.attachToTarget", { targetId: pop.targetId, flatten: true });
+      await b.send("Runtime.enable", {}, sessionId);
+      await sleep(600);
+      how = "popup: " + await evaluate(b, sessionId, `document.getElementById("status").textContent`);
+      await b.send("Target.closeTarget", { targetId: pop.targetId }).catch(() => {});
+    } else {
+      how = "badge: " + await swEval(b, extId, `chrome.tabs.query({ active: true, lastFocusedWindow: true })
+        .then(function (t) { return Promise.all([chrome.action.getBadgeText({ tabId: t[0].id }), chrome.action.getTitle({ tabId: t[0].id })]); })
+        .then(function (r) { return r.join(" · "); })`);
+    }
+    record("Shortcut on a chrome:// page explains why it can't run", /doesn't allow extensions/.test(how), how);
 
     // Restricted page and PDF: Launch is disabled with a friendly message.
     for (const [name, url, re] of [["chrome:// page", "chrome://version/", /doesn't allow extensions/],

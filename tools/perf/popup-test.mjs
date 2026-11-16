@@ -11,13 +11,18 @@ import { ROOT, click } from "./harness.mjs";
 
 const POPUP = pathToFileURL(path.join(ROOT, "popup.html")).href;
 
-// cfg: { url, fileAccess, contentType, probeError, injectError }
+// cfg: { url, fileAccess, contentType, probeError, injectError, shortcut, report }
 function mockChrome(cfg) {
   return `
     window.__calls = [];
     window.__cfg = ${JSON.stringify(cfg)};
+    window.close = function () { window.__closed = true; };
     window.chrome = {
-      tabs: { query: async function () { return [{ id: 7, url: __cfg.url }]; } },
+      commands: { getAll: async function () { return [{ name: "toggle-game", shortcut: __cfg.shortcut === undefined ? "Alt+Shift+X" : __cfg.shortcut }]; } },
+      tabs: {
+        query: async function () { return [{ id: 7, url: __cfg.url }]; },
+        create: async function (o) { __calls.push("open:" + o.url); }
+      },
       extension: { isAllowedFileSchemeAccess: async function () { return !!__cfg.fileAccess; } },
       scripting: {
         insertCSS: async function (o) { __calls.push("insertCSS"); },
@@ -30,7 +35,8 @@ function mockChrome(cfg) {
             return [{ result: undefined }];
           }
           var src = String(o.func);
-          if (src.indexOf("__cannonBlastDestroy") >= 0) { __calls.push("remove"); __cfg.active = false; return [{}]; }
+          if (src.indexOf("__cannonBlastDestroy") >= 0) { __calls.push("remove"); __cfg.active = false; return [{ result: !!__cfg.report }]; }
+          if (src.indexOf("__cbLaunch") >= 0) { __calls.push("launch:" + o.args[0].via + ":" + o.args[0].shortcut); return [{}]; }
           __calls.push("probe");
           if (__cfg.probeError) throw new Error(__cfg.probeError);
           return [{ result: { active: !!__cfg.active, type: __cfg.contentType || "text/html", html: __cfg.html !== false } }];
@@ -55,8 +61,11 @@ const CASES = [
   { name: "SVG / XML document", cfg: { url: "https://example.com/logo.svg", contentType: "image/svg+xml", html: false }, status: /SVG or XML/, disabled: true, calls: ["probe"] },
   { name: "Probe blocked by Chrome", cfg: { url: "https://example.com/", probeError: "Cannot access contents of the page. Extension manifest must request permission to access the respective host." }, status: PROTECTED, disabled: true, calls: ["probe"] },
   { name: "Error page", cfg: { url: "https://down.example/", probeError: "Frame with ID 0 is showing error page" }, status: /error page/, disabled: true, calls: ["probe"] },
-  { name: "Launch + remove", cfg: { url: "https://example.com/" }, status: /Cannon removed/, disabled: false, clicks: 2, calls: ["probe", "inject:content.js", "remove"] },
-  { name: "Launch fails later", cfg: { url: "https://example.com/", injectError: "Cannot access contents of url \"https://example.com/\"." }, status: PROTECTED, disabled: false, clicks: 1, calls: ["probe", "inject:content.js"] },
+  { name: "Launch + remove", cfg: { url: "https://example.com/" }, status: /Cannon removed/, disabled: false, clicks: 2, calls: ["probe", "launch:popup:Alt+Shift+X", "inject:content.js", "remove"], closed: false },
+  { name: "Remove with report closes", cfg: { url: "https://example.com/", report: true }, status: /Cannon removed/, disabled: false, clicks: 2, calls: ["probe", "launch:popup:Alt+Shift+X", "inject:content.js", "remove"], closed: true },
+  { name: "Launch fails later", cfg: { url: "https://example.com/", injectError: "Cannot access contents of url \"https://example.com/\"." }, status: PROTECTED, disabled: false, clicks: 1, calls: ["probe", "launch:popup:Alt+Shift+X", "inject:content.js"] },
+  { name: "Shortcut shown + change", cfg: { url: "https://example.com/", shortcut: "⌥⇧X" }, status: /^$/, disabled: false, link: true, shortcutText: /Shortcut: ⌥⇧X launches on any page · change/, calls: ["probe", "open:chrome://extensions/shortcuts"] },
+  { name: "No shortcut set", cfg: { url: "https://example.com/", shortcut: "" }, status: /^$/, disabled: false, shortcutText: /No shortcut set · set one/, calls: ["probe"] },
 ];
 
 async function main() {
@@ -76,10 +85,19 @@ async function main() {
         await click(page, r.x, r.y);
         await sleep(150);
       }
-      const st = await page.eval(`({ status: document.getElementById("status").textContent, disabled: document.getElementById("launchBtn").disabled, calls: window.__calls })`);
-      const ok = c.status.test(st.status) && st.disabled === c.disabled && JSON.stringify(st.calls) === JSON.stringify(c.calls);
+      if (c.link) {
+        const r = await page.eval(`(function(){ var b = document.querySelector("#shortcut a").getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
+        await click(page, r.x, r.y);
+        await sleep(100);
+      }
+      await sleep(250);
+      const st = await page.eval(`({ status: document.getElementById("status").textContent, disabled: document.getElementById("launchBtn").disabled,
+        calls: window.__calls, shortcut: document.getElementById("shortcut").textContent, closed: !!window.__closed })`);
+      const ok = c.status.test(st.status) && st.disabled === c.disabled && JSON.stringify(st.calls) === JSON.stringify(c.calls) &&
+        (c.closed === undefined || st.closed === c.closed) && (!c.shortcutText || c.shortcutText.test(st.shortcut));
       if (!ok) failed++;
-      console.log(`${ok ? "PASS" : "FAIL"}  ${c.name.padEnd(26)} "${st.status}" disabled=${st.disabled} calls=${st.calls.join(",") || "-"}`);
+      console.log(`${ok ? "PASS" : "FAIL"}  ${c.name.padEnd(26)} "${st.status}" disabled=${st.disabled} calls=${st.calls.join(",") || "-"}` +
+        (c.closed !== undefined ? ` closed=${st.closed}` : "") + (c.shortcutText ? ` shortcut="${st.shortcut}"` : ""));
       await page.send("Page.close").catch(() => {});
       page.close();
     }

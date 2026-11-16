@@ -44,7 +44,7 @@ export const PERF_RECORDER = `
 // chrome.* stand-ins for the isolated world (the real popup injects with these APIs available).
 function chromeShim(introSeen) {
   return `
-    var __cbStore = { cbIntroSeen: ${introSeen ? 99 : 0}, cbTotalKills: 999 };
+    var __cbStore = { cbIntroSeen: ${introSeen ? 99 : 0}, cbTotalKills: 999, cbMuted: false };
     globalThis.chrome = {
       runtime: { getManifest: function () { return { version: "test" }; } },
       storage: { local: {
@@ -80,14 +80,59 @@ export async function openPage(browser, url, { cpu = 1, width = 1280, height = 8
   return page;
 }
 
+// Installed in the game's isolated world: counts Web Audio sources the game starts
+// (and how many play at once) and samples the final output level every 50 ms.
+export const AUDIO_PROBE = `(function () {
+  var Orig = window.AudioContext;
+  if (!Orig || window.__audio) return;
+  var A = window.__audio = { contexts: 0, closed: 0, sources: 0, live: 0, maxLive: 0, peak: 0, loud: 0 };
+  function Probe(opts) {
+    var ac = new Orig(opts);
+    A.contexts++;
+    var tap = ac.createGain(), an = ac.createAnalyser();
+    an.fftSize = 1024;
+    tap.connect(ac.destination); tap.connect(an);
+    Object.defineProperty(ac, "destination", { value: tap });
+    var buf = new Float32Array(an.fftSize);
+    var iv = setInterval(function () {
+      if (ac.state === "closed") { clearInterval(iv); return; }
+      an.getFloatTimeDomainData(buf);
+      var p = 0;
+      for (var i = 0; i < buf.length; i++) { var v = Math.abs(buf[i]); if (v > p) p = v; }
+      if (p > A.peak) A.peak = p;
+      if (p > 0.02) A.loud++;
+    }, 50);
+    var close = ac.close.bind(ac);
+    ac.close = function () { A.closed++; return close(); };
+    return ac;
+  }
+  Probe.prototype = Orig.prototype;
+  window.AudioContext = Probe;
+  // Buffer sources have their own start(), so patch every prototype that defines one.
+  [AudioScheduledSourceNode, AudioBufferSourceNode, OscillatorNode, ConstantSourceNode].forEach(function (C) {
+    var proto = C && C.prototype;
+    if (!proto || !Object.prototype.hasOwnProperty.call(proto, "start")) return;
+    var start = proto.start;
+    proto.start = function () {
+      A.sources++; A.live++;
+      if (A.live > A.maxLive) A.maxLive = A.live;
+      var ended = false;
+      this.addEventListener("ended", function () { if (!ended) { ended = true; A.live--; } });
+      return start.apply(this, arguments);
+    };
+  });
+})();`;
+
 // Injects the game into a fresh isolated world (like a content script). Returns the context id.
-export async function injectGame(page, variant, { introSeen = true, contextId = null } = {}) {
+export async function injectGame(page, variant, { introSeen = true, contextId = null, audioProbe = false, launch = null } = {}) {
   if (!contextId) {
     const { frameTree } = await page.send("Page.getFrameTree");
     const world = await page.send("Page.createIsolatedWorld", { frameId: frameTree.frame.id, worldName: "BlastBlastBlast" });
     contextId = world.executionContextId;
     await page.eval(chromeShim(introSeen), contextId);
+    if (audioProbe) await page.eval(AUDIO_PROBE, contextId);
   }
+  if (launch) await page.eval(`self.__cbLaunch = ${JSON.stringify(launch)};`, contextId);
   if (variant.css) {
     await page.eval(`(function(){ var s = document.createElement("style"); s.setAttribute("data-harness", ""); s.textContent = ${JSON.stringify(variant.css)}; document.documentElement.appendChild(s); })()`);
   }

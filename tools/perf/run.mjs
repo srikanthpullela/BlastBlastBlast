@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Perf check: rapid cannon fire, gun hold-fire and Danger swarm on a heavy page,
 // v1.2.1 (from git) vs the working tree. Dev-only; not part of the extension.
+// Chrome runs muted, but the game's sound engine still renders every effect;
+// "sounds" counts the Web Audio sources it started during the run.
 //
 //   node tools/perf/run.mjs [--cpu 4] [--runs 2] [--dpr 2] [--only cannon,gun,danger] [--baseline <rev>] [--json out.json]
 import { writeFileSync } from "node:fs";
@@ -91,12 +93,13 @@ const SCENARIOS = { cannon: scenarioCannon, gun: scenarioGun, danger: scenarioDa
 
 function pct(sorted, p) { return sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(p / 100 * sorted.length))] : 0; }
 
-async function measure(page, fn, rand) {
+async function measure(page, fn, rand, contextId) {
   const m0 = await page.send("Performance.getMetrics");
   const t0 = await page.eval("performance.now()");
   if (await fn(page, rand) === null) return null;
   const t1 = await page.eval("performance.now()");
   const m1 = await page.send("Performance.getMetrics");
+  const audio = await page.eval("window.__audio ? { sources: window.__audio.sources, maxLive: window.__audio.maxLive } : null", contextId);
   const perf = await page.eval(`(function(){ var p = window.__perf; return {
       frames: p.frames.filter(function (t) { return t >= ${t0} && t <= ${t1}; }),
       lt: p.lt.filter(function (e) { return e[0] >= ${t0} && e[0] <= ${t1}; }),
@@ -124,6 +127,8 @@ async function measure(page, fn, rand) {
     styleMs: diff("RecalcStyleDuration") * 1000,
     scriptMs: diff("ScriptDuration") * 1000,
     taskMs: diff("TaskDuration") * 1000,
+    sounds: audio ? audio.sources : 0,
+    voicesMax: audio ? audio.maxLive : 0,
   };
 }
 
@@ -140,16 +145,16 @@ async function main() {
         for (const v of variants) {          // alternate variants to cancel out drift
           const page = await openPage(browser, `${server.origin}/heavy.html`, { cpu: CPU, dpr: DPR });
           await page.eval("window.scrollTo(0, 240)");
-          await injectGame(page, v);
+          const ctx = await injectGame(page, v, { audioProbe: true });
           await sleep(400);
-          const r = await measure(page, SCENARIOS[scen], prng(1000 + run));
+          const r = await measure(page, SCENARIOS[scen], prng(1000 + run), ctx);
           if (!r) { await page.send("Page.close").catch(() => {}); page.close(); continue; }
           r.errors = page.errors.length;
           if (page.errors.length) process.stderr.write(`  script errors: ${page.errors.slice(0, 3).join(" | ")}\n`);
           ((results[scen] ||= {})[v.name] ||= []).push(r);
           await page.send("Page.close").catch(() => {});
           page.close();
-          process.stderr.write(`${scen} ${v.name} run ${run + 1}: p95 ${r.p95.toFixed(1)}ms, long frames ${r.loafOver50} (max ${r.loafMax.toFixed(0)}ms), long tasks ${r.longTasks}, CLS ${r.cls.toFixed(3)}\n`);
+          process.stderr.write(`${scen} ${v.name} run ${run + 1}: p95 ${r.p95.toFixed(1)}ms, long frames ${r.loafOver50} (max ${r.loafMax.toFixed(0)}ms), long tasks ${r.longTasks}, CLS ${r.cls.toFixed(3)}, sounds ${r.sounds}\n`);
         }
       }
     }
@@ -160,7 +165,7 @@ async function main() {
 
   const KEYS = [["frames", 0], ["p50", 1], ["p95", 1], ["p99", 1], ["max", 0], ["over20", 1], ["over33", 1],
     ["longTasks", 0], ["longTaskMax", 0], ["longTaskTotal", 0], ["loafOver50", 0], ["loafMax", 0], ["cls", 3],
-    ["layouts", 0], ["layoutMs", 0], ["styleMs", 0], ["scriptMs", 0], ["taskMs", 0], ["errors", 0]];
+    ["layouts", 0], ["layoutMs", 0], ["styleMs", 0], ["scriptMs", 0], ["taskMs", 0], ["sounds", 0], ["voicesMax", 0], ["errors", 0]];
   console.log(`\nHeadless Chrome, 1280x800 @${DPR}x, CPU throttle ${CPU}x, median of ${RUNS} run(s)\n`);
   for (const scen of Object.keys(results)) {
     console.log(`== ${scen} ==`);

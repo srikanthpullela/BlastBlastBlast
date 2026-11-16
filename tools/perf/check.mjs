@@ -2,7 +2,8 @@
 // Functional checks for both builds on the heavy test page: text blasting
 // without reflow, framework-owned text, srcset/quote images, page-anchored
 // marks, iframe click-through, debounced best score, complete teardown and
-// relaunch. Prints a pass/fail table. Dev-only; not part of the extension.
+// relaunch; for the current build also sound, keys and the blast report.
+// Prints a pass/fail table. Dev-only; not part of the extension.
 //
 //   node tools/perf/check.mjs [--baseline <rev>] [--shots <dir>]
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -39,7 +40,8 @@ const SNAPSHOT = `(function () {
   var body = document.body.cloneNode(true);
   var t = body.querySelector("#ticker"); if (t) t.textContent = "";
   var attrs = [].map.call(html.attributes, function (a) { return a.name + "=" + a.value; }).join(" ");
-  return { body: body.outerHTML, htmlAttrs: attrs, htmlChildren: html.children.length,
+  var kids = [].filter.call(html.children, function (e) { return e.id !== "__cb_report"; }).length;
+  return { body: body.outerHTML, htmlAttrs: attrs, htmlChildren: kids,
            text: body.querySelector("#article").textContent };
 })()`;
 
@@ -55,13 +57,50 @@ async function newestMarkTop(page) {
   })()`);
 }
 
+const REPORT = `(function(){ var h = document.getElementById("__cb_report"); return h && h.shadowRoot ? h.shadowRoot.textContent : null; })()`;
+// The first-run intro card: on screen, clear of the score bar, the "pick weapons" hint and the controls.
+const INTRO_FIT = `(function () {
+  var b = document.getElementById("__cbIntroOk");
+  if (!b) return { ok: false, detail: "no intro" };
+  var card = b.parentNode, c = card.getBoundingClientRect(), hintEl = card.previousSibling;
+  var hint = getComputedStyle(hintEl).display === "none" ? null : hintEl.getBoundingClientRect();
+  var mute = document.querySelector('button[title*="press M"]');
+  var others = [hint, mute && mute.parentNode.getBoundingClientRect(),
+    document.getElementById("__cb_arsenal").getBoundingClientRect(), document.getElementById("__cb_danger_btn").getBoundingClientRect()];
+  var hits = others.filter(function (r) { return r && r.top < c.bottom && c.top < r.bottom && r.left < c.right && c.left < r.right; }).length;
+  return { ok: c.top >= 0 && c.bottom <= innerHeight && hits === 0,
+    detail: "card " + Math.round(c.top) + "–" + Math.round(c.bottom) + (hint ? ", hint at " + Math.round(hint.top) : ", hint hidden") +
+      (card.style.zoom ? ", scaled " + card.style.zoom : "") + (hits ? ", covered by " + hits + " element(s)" : "") };
+})()`;
+const audioStats = (page, ctx) => page.eval("window.__audio ? JSON.parse(JSON.stringify(window.__audio)) : null", ctx);
+
+async function holdFire(page, ms) {
+  const t0 = Date.now();
+  await mouse(page, "mousePressed", 300, 200);
+  while (Date.now() - t0 < ms) {
+    const t = (Date.now() - t0) / 1000;
+    await mouse(page, "mouseMoved", 640 + Math.sin(t * 2.1) * 560, 220 + Math.sin(t * 3.3) * 160, { held: true });
+    await sleep(16);
+  }
+  await mouse(page, "mouseReleased", 300, 200);
+}
+
 async function runChecks(browser, server, variant) {
   const out = [];
   const record = (name, pass, detail) => out.push({ name, pass, detail });
+  // Features new in this build: the baseline gets an "n/a" row instead.
+  const isNew = variant.name === "current";
+  const recordNew = (name, pass, detail) => out.push(isNew ? { name, pass, detail } : { name, pass: true, na: true, detail: "n/a (new feature)" });
   const page = await openPage(browser, `${server.origin}/heavy.html`);
   const before = await page.eval(SNAPSHOT);
-  const ctx = await injectGame(page, variant);
+  const LAUNCH = { shortcut: "Alt+Shift+X", via: "test" };
+  const ctx = await injectGame(page, variant, { audioProbe: true, launch: LAUNCH });
   await sleep(300);
+  // The first audio context in a browser session can block the page for ~150 ms while
+  // Chrome starts its audio service, so it must exist before the first shot.
+  const A0 = await audioStats(page, ctx);
+  recordNew("Audio is set up at launch, so the first shot can't stall", A0 && A0.contexts === 1 && A0.sources === 0,
+    A0 ? `${A0.contexts} audio context(s) before the first shot` : "no audio probe");
 
   // Iframe click-through: a click over a cross-origin iframe must fire the cannon.
   await page.eval(`document.getElementById("xframe").scrollIntoView({ block: "center" })`);
@@ -71,6 +110,9 @@ async function runChecks(browser, server, variant) {
   await blastAt(page, fr.x, fr.y, 400);
   const marks1 = await page.eval(markCount);
   record("Click over cross-origin iframe fires", marks1 > marks0, `marks ${marks0} -> ${marks1}`);
+  const A1 = await audioStats(page, ctx);
+  recordNew("The first shot is heard (the click resumes the audio)", A1 && A1.sources > 0 && A1.loud > 0,
+    A1 ? `${A1.sources} sound source(s), ${A1.loud} loud sample(s) after one shot` : "no audio probe");
 
   // Images: blasting must not fetch anything (srcset fallback, URL with a quote).
   await page.eval("window.scrollTo(0, 0)");
@@ -142,6 +184,25 @@ async function runChecks(browser, server, variant) {
   const dupGlow = await page.eval(`document.querySelectorAll('[id="__cbGlow"]').length`);
   record("No duplicate element IDs from marks", dupGlow <= 1, `${dupGlow} x #__cbGlow`);
 
+  // G / Shift+G cycle weapons, D toggles Danger.
+  if (isNew) {
+    const label = () => page.eval(`document.getElementById("__cb_arsenal").firstChild.textContent`);
+    const dangerText = () => page.eval(`document.getElementById("__cb_danger_btn").textContent`);
+    const l0 = await label();
+    await key(page, "g", "KeyG", 71); await sleep(80);
+    const l1 = await label();
+    await page.send("Input.dispatchKeyEvent", { type: "keyDown", key: "G", code: "KeyG", windowsVirtualKeyCode: 71, modifiers: 8 });
+    await page.send("Input.dispatchKeyEvent", { type: "keyUp", key: "G", code: "KeyG", windowsVirtualKeyCode: 71, modifiers: 8 });
+    await sleep(80);
+    const l2 = await label();
+    await key(page, "d", "KeyD", 68); await sleep(150);
+    const d1 = await dangerText();
+    await key(page, "d", "KeyD", 68); await sleep(150);
+    const d2 = await dangerText();
+    recordNew("Keys: G / Shift+G switch weapons, D toggles Danger", /CANNON/.test(l0) && /GUN/.test(l1) && /CANNON/.test(l2) && /ON/.test(d1) && /OFF/.test(d2),
+      `${l0} → G → ${l1} → Shift+G → ${l2}; D → ${d1.replace(/\s+/g, " ")} → D → ${d2.replace(/\s+/g, " ")}`);
+  } else recordNew("Keys: G / Shift+G switch weapons, D toggles Danger");
+
   // Best score writes are debounced: swarm + gun until a few kills happen.
   const dangerBtn = await centerOf(page, "#__cb_danger_btn");
   await click(page, dangerBtn.x, dangerBtn.y);
@@ -159,6 +220,32 @@ async function runChecks(browser, server, variant) {
   const kills = await page.eval(`(function(){ var m = document.body.parentNode.querySelector("#__cannon_wrapper"); var t = m ? m.textContent : ""; var k = t.match(/🎯\\s*(\\d+)/); return k ? +k[1] : 0; })()`);
   const writes = await page.eval("window.__cbWrites || 0", ctx);
   record("Best score saves are debounced", kills < 3 || writes < kills, `${kills} kill(s), ${writes} storage write(s)`);
+
+  if (isNew) {
+    const A = await audioStats(page, ctx);
+    recordNew("Sound effects play (synthesized, no files)", A && A.contexts === 1 && A.sources > 50 && A.loud > 5,
+      A ? `${A.sources} sound sources in ~12 s of Danger mode, output peak ${A.peak.toFixed(2)}` : "no audio context");
+    recordNew("Sound stays capped and doesn't clip in Danger mode", A && A.maxLive <= 90 && A.peak <= 1,
+      A ? `at most ${A.maxLive} sources at once, peak ${A.peak.toFixed(2)}` : "no audio");
+    // M mutes (nothing new is synthesized) and the choice is saved.
+    await key(page, "m", "KeyM", 77);
+    await sleep(150);
+    const s0 = (await audioStats(page, ctx)).sources;
+    await holdFire(page, 1000);
+    await sleep(300);
+    const s1 = (await audioStats(page, ctx)).sources;
+    const stored = await page.eval("__cbStore.cbMuted", ctx);
+    const icon = await page.eval(`document.getElementById("__cannon_wrapper").textContent.indexOf("🔇") >= 0`);
+    await key(page, "m", "KeyM", 77);
+    await sleep(150);
+    const stored2 = await page.eval("__cbStore.cbMuted", ctx);
+    recordNew("M mutes (and is remembered), M again unmutes", s1 === s0 && stored === true && icon && stored2 === false,
+      `${s1 - s0} new sources while muted, saved cbMuted=${stored} then ${stored2}, HUD shows 🔇: ${icon}`);
+  } else {
+    recordNew("Sound effects play (synthesized, no files)");
+    recordNew("Sound stays capped and doesn't clip in Danger mode");
+    recordNew("M mutes (and is remembered), M again unmutes");
+  }
   await click(page, dangerBtn.x, dangerBtn.y);
   await useWeapon(page, 1);
 
@@ -177,6 +264,25 @@ async function runChecks(browser, server, variant) {
   record("Esc leaves no game attributes/highlights", leftovers.attrs === 0 && leftovers.highlights === 0 && leftovers.iframePointer !== "none",
     `${leftovers.attrs} attribute(s), ${leftovers.highlights} highlight(s), iframe pointer-events ${leftovers.iframePointer}`);
   record("Page text is unchanged after Esc", after.text === before.text, after.text === before.text ? "identical" : "differs");
+  if (isNew) {
+    const rep1 = await page.eval(REPORT);
+    await screenshot(page, `${variant.name}-report`);
+    recordNew("Exit shows the blast report over the restored page", !!rep1 && /BLAST REPORT/.test(rep1) && /points?/.test(rep1),
+      rep1 ? rep1.replace(/\s+/g, " ").slice(0, 110) + "…" : "no report");
+    await key(page, "Escape", "Escape", 27);
+    await sleep(500);
+    const gone = await page.eval(REPORT) === null;
+    const after2 = await page.eval(SNAPSHOT);
+    recordNew("Esc again closes the report", gone && after2.htmlChildren === before.htmlChildren,
+      `report ${gone ? "closed" : "still open"}, html children ${before.htmlChildren} -> ${after2.htmlChildren}`);
+    await sleep(1800);
+    const A = await audioStats(page, ctx);
+    recordNew("Audio stops when the game ends", A && A.closed === A.contexts && A.live === 0, A ? `${A.closed}/${A.contexts} audio context(s) closed, ${A.live} sources left` : "no audio");
+  } else {
+    recordNew("Exit shows the blast report over the restored page");
+    recordNew("Esc again closes the report");
+    recordNew("Audio stops when the game ends");
+  }
 
   // Relaunch on the same page: previously shattered images can be blasted again.
   await page.eval("window.scrollTo(0, 0)");
@@ -189,6 +295,54 @@ async function runChecks(browser, server, variant) {
   record("Relaunch: shattered image can be blasted again", heroHidden, heroHidden ? "hero shattered again" : "hero ignored");
   await key(page, "Escape", "Escape", 27);
   await sleep(200);
+  if (isNew) {
+    // The page stays usable: a click on it goes through and closes the report.
+    const shown = await page.eval(REPORT) !== null;
+    const probe = await centerOf(page, "#probe");
+    await click(page, probe.x, probe.y);
+    await sleep(400);
+    const clicks = await page.eval("window.__probeClicks || 0");
+    const closed = await page.eval(REPORT) === null;
+    recordNew("The report never blocks the page (a click goes through and closes it)", shown && clicks === 1 && closed,
+      `report shown: ${shown}, page button clicks: ${clicks}, report closed: ${closed}`);
+    // Relaunching while the report is open closes it right away.
+    await injectGame(page, variant, { contextId: ctx, launch: LAUNCH });
+    await sleep(200);
+    await blastAt(page, 500, 300, 200);
+    await key(page, "Escape", "Escape", 27);
+    await sleep(300);
+    const open1 = await page.eval(REPORT) !== null;
+    await injectGame(page, variant, { contextId: ctx, launch: LAUNCH });
+    await sleep(100);
+    const open2 = await page.eval(REPORT) !== null;
+    recordNew("Relaunching closes an open report", open1 && !open2, `open before relaunch: ${open1}, after: ${open2}`);
+    // It closes by itself after about 10 s.
+    await blastAt(page, 520, 320, 200);
+    await key(page, "Escape", "Escape", 27);
+    await sleep(300);
+    const open3 = await page.eval(REPORT) !== null;
+    await sleep(10500);
+    const open4 = await page.eval(REPORT) !== null;
+    recordNew("The report closes by itself after ~10 s", open3 && !open4, `open at 0.3 s: ${open3}, at 10.8 s: ${open4}`);
+  } else {
+    recordNew("The report never blocks the page (a click goes through and closes it)");
+    recordNew("Relaunching closes an open report");
+    recordNew("The report closes by itself after ~10 s");
+  }
+  // The first-run intro fits laptop-sized and small windows.
+  if (isNew) {
+    const fits = [];
+    for (const [w, h] of [[1280, 800], [1280, 640], [800, 500]]) {
+      const p = await openPage(browser, `${server.origin}/heavy.html`, { width: w, height: h });
+      await injectGame(p, variant, { introSeen: false, launch: LAUNCH });
+      await sleep(600);
+      fits.push(Object.assign({ size: `${w}x${h}` }, await p.eval(INTRO_FIT)));
+      page.errors.push(...p.errors);
+      await p.send("Page.close").catch(() => {});
+      p.close();
+    }
+    recordNew("The intro fits short windows (nothing covers its button)", fits.every((f) => f.ok), fits.map((f) => `${f.size}: ${f.detail}`).join("; "));
+  } else recordNew("The intro fits short windows (nothing covers its button)");
   record("No script errors", page.errors.length === 0, page.errors.length ? page.errors.slice(0, 3).join(" | ") : "none");
   await page.send("Page.close").catch(() => {});
   page.close();
@@ -213,7 +367,7 @@ async function main() {
     console.log(`\n${row}`);
     for (const n of names) {
       const r = table[n][i];
-      console.log(`  ${n.padEnd(8)} ${r.pass ? "PASS" : "FAIL"}  ${r.detail}`);
+      console.log(`  ${n.padEnd(8)} ${r.na ? "n/a " : r.pass ? "PASS" : "FAIL"}  ${r.na ? "" : r.detail}`);
     }
   }
   const failed = table.current.filter((r) => !r.pass);
