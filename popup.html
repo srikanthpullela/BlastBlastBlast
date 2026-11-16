@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BlastBlastBlast</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --accent: #ff6600;
+      --accent2: #ff2200;
+      --glow: rgba(255, 102, 0, 0.6);
+    }
+
+    body {
+      width: 300px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: radial-gradient(circle at 50% 0%, #1a1212 0%, #0a0a0f 70%);
+      color: #f5f5f5;
+      padding: 24px 20px 22px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* Subtle animated ember glow in the background */
+    body::before {
+      content: "";
+      position: absolute;
+      top: -60px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 200px;
+      height: 200px;
+      background: radial-gradient(circle, rgba(255, 102, 0, 0.18) 0%, transparent 70%);
+      pointer-events: none;
+      animation: pulseGlow 3s ease-in-out infinite;
+    }
+
+    @keyframes pulseGlow {
+      0%, 100% { opacity: 0.5; }
+      50% { opacity: 1; }
+    }
+
+    .header {
+      text-align: center;
+      position: relative;
+      z-index: 1;
+    }
+
+    .icon {
+      font-size: 46px;
+      line-height: 1;
+      filter: drop-shadow(0 0 12px var(--glow));
+      animation: float 3s ease-in-out infinite;
+    }
+
+    @keyframes float {
+      0%, 100% { transform: translateY(0) rotate(-4deg); }
+      50% { transform: translateY(-5px) rotate(4deg); }
+    }
+
+    h1 {
+      font-size: 24px;
+      font-weight: 800;
+      margin-top: 8px;
+      letter-spacing: 0.5px;
+      background: linear-gradient(90deg, #ffd000, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      text-shadow: 0 0 20px rgba(255, 102, 0, 0.3);
+    }
+
+    .tagline {
+      font-size: 12px;
+      color: #b0a8a0;
+      margin-top: 3px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    .btn {
+      display: block;
+      width: 100%;
+      margin-top: 22px;
+      padding: 14px 16px;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      position: relative;
+      z-index: 1;
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 100%);
+      box-shadow: 0 0 0 1px rgba(255, 160, 80, 0.4),
+                  0 6px 18px rgba(255, 60, 0, 0.45),
+                  0 0 24px var(--glow);
+      transition: transform 0.12s ease, box-shadow 0.2s ease, filter 0.2s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      filter: brightness(1.08);
+      box-shadow: 0 0 0 1px rgba(255, 180, 100, 0.6),
+                  0 10px 26px rgba(255, 60, 0, 0.6),
+                  0 0 36px var(--glow);
+    }
+
+    .btn:active {
+      transform: translateY(0) scale(0.98);
+    }
+
+    .btn.remove {
+      background: linear-gradient(135deg, #444 0%, #222 100%);
+      box-shadow: 0 0 0 1px rgba(255, 102, 0, 0.5),
+                  0 6px 16px rgba(0, 0, 0, 0.5);
+      color: var(--accent);
+    }
+
+    .btn.remove:hover {
+      box-shadow: 0 0 0 1px rgba(255, 102, 0, 0.9),
+                  0 8px 20px rgba(0, 0, 0, 0.6);
+    }
+
+    .hint {
+      margin-top: 14px;
+      font-size: 11px;
+      color: #8a847e;
+      text-align: center;
+      line-height: 1.5;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hint b {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .status {
+      margin-top: 12px;
+      font-size: 11px;
+      text-align: center;
+      min-height: 14px;
+      color: #6cd06c;
+      position: relative;
+      z-index: 1;
+    }
+
+    .status.error { color: #ff6b6b; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="icon">🔥</div>
+    <h1>BlastBlastBlast</h1>
+    <div class="tagline">Destroy any webpage!</div>
+  </div>
+
+  <button id="launchBtn" class="btn">🔥 Launch Cannon!</button>
+
+  <div class="hint">
+    Move to aim &bull; <b>Click</b> to fire &bull; <b>Hold</b> to rapid-fire (🔫) &bull; <b>⚠️ Danger</b> toggle &bull; <b>Esc</b> to remove
+  </div>
+
+  <div id="status" class="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
