@@ -20,6 +20,7 @@
   // made click-through (see the style sheet below) so aiming and firing also
   // work over iframes.
   if (window.top !== window) return;
+  if (!(document.documentElement instanceof HTMLElement)) return;   // SVG / XML documents
   if (window.__cannonBlastActive) return;
   window.__cannonBlastActive = true;
 
@@ -79,8 +80,11 @@
   var dpr      = window.devicePixelRatio || 1;
   var scrollX0 = window.scrollX;
   var scrollY0 = window.scrollY;
-  var docW     = viewW;
-  var docH     = viewH;
+  // Scrollable document area and the marks layer origin, in viewport coordinates.
+  var docMinX = 0, docMaxX = viewW, docMinY = 0, docMaxY = viewH;
+  var layerX = 0, layerY = 0;
+  var rtlRoot = false;
+  try { rtlRoot = getComputedStyle(document.documentElement).direction === "rtl"; } catch (e) {}
   var mouseX   = viewW / 2;
   var mouseY   = viewH / 2;
 
@@ -143,7 +147,8 @@
     "@keyframes cbVignette{0%,100%{opacity:.7}50%{opacity:1}}",
     "@keyframes cbWiggle{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}",
     "@keyframes cbMarkIn{from{transform:scale(.3);opacity:0}to{transform:scale(1);opacity:1}}",
-    ".__cb_mark{position:absolute;pointer-events:none;animation:cbMarkIn .2s ease-out}",
+    ".__cb_mark{position:absolute;pointer-events:none;animation:cbMarkIn .2s ease-out;max-width:none!important;max-height:none!important;" +
+      "min-width:0!important;min-height:0!important;margin:0!important;padding:0!important;border:0!important;box-sizing:content-box!important}",
     ".__cb_mark.__cb_fading{opacity:0;transition:opacity var(--cb-fade,10s) linear}"
   ].join("\n");
   document.documentElement.appendChild(styleEl);
@@ -1320,6 +1325,7 @@
     runs.sort(function (a, b) { return a[0] - b[0]; });
     for (var r = runs.length - 1; r >= 0; r--) {
       var a = runs[r][0], b = runs[r][1];
+      if (b > node.length || a >= b) continue;
       if (b < node.length) fbCreated.push(node.splitText(b));
       var mid = node.splitText(a);
       var span = document.createElement("span");
@@ -1507,6 +1513,7 @@
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.globalAlpha = 1;
+    ctx.textAlign = "start";
   }
 
   /* ── PRE-RENDERED SPRITES (instead of per-frame shadowBlur / gradients) ─── */
@@ -1822,29 +1829,25 @@
 
   function createBlastMark(cx, cy) {
     var v = pickMarkVariant();
-    if (!marksLayer) {
-      marksLayer = document.createElement("div");
-      marksLayer.setAttribute("data-cb-ui", "1");
-      marksLayer.style.cssText = "position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2147483644;";
-      document.documentElement.appendChild(marksLayer);
-      removeList.push(marksLayer);
-    }
-    // Page coordinates, clipped to the document so marks never grow the page.
-    var docX = cx + scrollX0, docY = cy + scrollY0, half = v.half;
-    var L = Math.max(0, docX - half), T = Math.max(0, docY - half);
-    var Rr = Math.min(docW, docX + half), B = Math.min(docH, docY + half);
+    if (!marksLayer) return;
+    // Clip the mark to the scrollable document area (viewport coordinates) so
+    // it never grows the page, then place it relative to the marks layer.
+    var half = v.half;
+    var L = Math.max(docMinX, cx - half), T = Math.max(docMinY, cy - half);
+    var Rr = Math.min(docMaxX, cx + half), B = Math.min(docMaxY, cy + half);
     var w = Math.floor(Rr - L), h = Math.floor(B - T);
     if (w < 4 || h < 4) return;
     var c = document.createElement("canvas");
     c.className = "__cb_mark";
     c.width = Math.ceil(w * dpr);
     c.height = Math.ceil(h * dpr);
-    c.style.cssText = "left:" + L.toFixed(1) + "px;top:" + T.toFixed(1) + "px;width:" + w + "px;height:" + h + "px;" +
-                      "transform-origin:" + (docX - L).toFixed(1) + "px " + (docY - T).toFixed(1) + "px;";
+    c.style.cssText = "left:" + (L - layerX).toFixed(1) + "px;top:" + (T - layerY).toFixed(1) + "px;" +
+                      "width:" + w + "px!important;height:" + h + "px!important;" +
+                      "transform-origin:" + (cx - L).toFixed(1) + "px " + (cy - T).toFixed(1) + "px;";
     var x = c.getContext("2d");
     var ang = Math.random()*Math.PI*2, k = dpr / v.dpr;
     var cs = Math.cos(ang)*k, sn = Math.sin(ang)*k;
-    x.setTransform(cs, sn, -sn, cs, (docX - L)*dpr, (docY - T)*dpr);
+    x.setTransform(cs, sn, -sn, cs, (cx - L)*dpr, (cy - T)*dpr);
     x.drawImage(v.c, -half * v.dpr, -half * v.dpr);
     marksLayer.appendChild(c);
     marks.push({ el: c, born: clock, removeAt: 0 });
@@ -2256,6 +2259,7 @@
       ctx.fillStyle = "rgba(200,30,25,0.9)";
       roundRectPath(x, ty, tw, 12, 3); ctx.fill();
       ctx.fillStyle = "#fff";
+      ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       ctx.fillText(label, x+4, ty+6.5);
       ctx.restore();
@@ -2431,9 +2435,14 @@
     scrollX0 = window.scrollX;
     scrollY0 = window.scrollY;
     var de = document.documentElement;
-    docW = Math.max(de.scrollWidth, viewW);
-    docH = Math.max(de.scrollHeight, viewH);
-    for (var j = 0; j < 2 && blastQueue.length; j++) blastResults.push(readBlast(blastQueue.shift()));
+    var sw = Math.max(de.scrollWidth, de.clientWidth), sh = Math.max(de.scrollHeight, de.clientHeight);
+    docMinX = rtlRoot ? de.clientWidth - sw - scrollX0 : -scrollX0;
+    docMaxX = docMinX + sw;
+    docMinY = -scrollY0;
+    docMaxY = docMinY + sh;
+    if (marksLayer) { var lr = marksLayer.getBoundingClientRect(); layerX = lr.left; layerY = lr.top; }
+    var jobs = hlSupported ? 2 : 1;   // the span fallback splits text nodes, so one blast per frame
+    for (var j = 0; j < jobs && blastQueue.length; j++) blastResults.push(readBlast(blastQueue.shift()));
     readSoldiers(dt);
     if (!introActive) stepLootScan(blastResults.length ? 0.5 : 1.0);
   }
@@ -2492,6 +2501,11 @@
   /* ── START ───────────────────────────────────────────────────────────────── */
   document.documentElement.appendChild(wrapper);
   removeList.push(wrapper);
+  marksLayer = document.createElement("div");
+  marksLayer.setAttribute("data-cb-ui", "1");
+  marksLayer.style.cssText = "position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2147483644;";
+  document.documentElement.appendChild(marksLayer);
+  removeList.push(marksLayer);
   resizeCanvas();
   renderHUD();
   loadBest();

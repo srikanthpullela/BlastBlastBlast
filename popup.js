@@ -14,6 +14,7 @@ const MSG_PROTECTED = "Chrome doesn't allow extensions on this page. Open a regu
 const MSG_STORE = "Chrome doesn't allow extensions on the Chrome Web Store. Open another site and try again.";
 const MSG_FILE = "To play on local files, turn on “Allow access to file URLs” for BlastBlastBlast in chrome://extensions.";
 const MSG_PDF = "PDFs open in Chrome's built-in viewer, which can't be blasted. Try a regular web page.";
+const MSG_NOT_HTML = "This is an SVG or XML file, not a web page, so it can't be blasted. Try a regular website.";
 const MSG_ERROR_PAGE = "This tab is showing an error page. Load a website and try again.";
 const MSG_GENERIC = "BlastBlastBlast can't run on this page. Try a regular website.";
 
@@ -64,14 +65,18 @@ async function getActiveTab() {
   return tab;
 }
 
-/** Ask the page whether the game is running (and whether it is a PDF). Throws if the page can't be scripted. */
+/** Ask the page whether the game is running and what kind of document it is. Throws if the page can't be scripted. */
 async function probePage(tabId) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
-    func: () => ({ active: !!window.__cannonBlastActive, type: document.contentType }),
+    func: () => ({
+      active: !!window.__cannonBlastActive,
+      type: document.contentType,
+      html: document.documentElement instanceof HTMLElement,
+    }),
   });
   const r = (results && results[0] && results[0].result) || {};
-  return { active: !!r.active, pdf: r.type === "application/pdf" };
+  return { active: !!r.active, pdf: r.type === "application/pdf", html: r.html !== false };
 }
 
 /** Inject the game into the page's top frame (it adds and removes its own styles). */
@@ -116,6 +121,10 @@ async function init() {
     const probe = await probePage(activeTabId);
     if (probe.pdf) {
       block(MSG_PDF);
+      return;
+    }
+    if (!probe.html) {
+      block(MSG_NOT_HTML);
       return;
     }
     cannonActive = probe.active;

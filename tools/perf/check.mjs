@@ -127,6 +127,18 @@ async function runChecks(browser, server, variant) {
   const top1 = await newestMarkTop(page);
   record("Blast marks scroll with the page", top0 != null && Math.abs((top0 - top1) - 150) < 2, `mark top ${top0 && top0.toFixed(0)} -> ${top1 && top1.toFixed(0)} after scrolling 150px`);
 
+  const markSize = await page.eval(`(function(){
+    var m = document.querySelectorAll(".__cb_mark"); var e = m.length ? m[m.length - 1] : null;
+    if (!e) { var old = [].filter.call(document.documentElement.children, function (x) { return x.style && x.style.zIndex === "2147483644" && x.querySelector("svg"); }); e = old.length ? old[old.length - 1] : null; }
+    if (!e) return null; var r = e.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height) }; })()`);
+  record("Blast marks survive a CSS reset (max-width:100%)", markSize && markSize.w > 20 && markSize.h > 20, markSize ? `newest mark ${markSize.w}x${markSize.h}px` : "no mark");
+
+  // A blast right next to the scrollbar must not make the page scroll sideways.
+  const sb0 = await page.eval("({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth, bar: innerWidth - document.documentElement.clientWidth })");
+  await blastAt(page, sb0.cw - 18, 300, 400);
+  const sb1 = await page.eval("document.documentElement.scrollWidth");
+  record("Blast at the right edge adds no horizontal scroll", sb1 <= sb0.cw, `scrollWidth ${sb0.sw} -> ${sb1} (viewport ${sb0.cw}px, scrollbar ${sb0.bar}px)`);
+
   const dupGlow = await page.eval(`document.querySelectorAll('[id="__cbGlow"]').length`);
   record("No duplicate element IDs from marks", dupGlow <= 1, `${dupGlow} x #__cbGlow`);
 
@@ -190,7 +202,7 @@ async function main() {
   const table = {};
   try {
     for (const v of variants) {
-      const browser = await launchChrome({ headless: !args.includes("--headful") });
+      const browser = await launchChrome({ headless: !args.includes("--headful"), hideScrollbars: false });
       try { table[v.name] = await runChecks(browser, server, v); } finally { await browser.close(); }
     }
   } finally {

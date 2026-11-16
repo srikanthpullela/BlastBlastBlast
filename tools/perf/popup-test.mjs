@@ -33,7 +33,7 @@ function mockChrome(cfg) {
           if (src.indexOf("__cannonBlastDestroy") >= 0) { __calls.push("remove"); __cfg.active = false; return [{}]; }
           __calls.push("probe");
           if (__cfg.probeError) throw new Error(__cfg.probeError);
-          return [{ result: { active: !!__cfg.active, type: __cfg.contentType || "text/html" } }];
+          return [{ result: { active: !!__cfg.active, type: __cfg.contentType || "text/html", html: __cfg.html !== false } }];
         }
       }
     };
@@ -52,6 +52,7 @@ const CASES = [
   { name: "file: without access", cfg: { url: "file:///Users/me/page.html", fileAccess: false }, status: /Allow access to file URLs/, disabled: true, calls: [] },
   { name: "file: with access", cfg: { url: "file:///Users/me/page.html", fileAccess: true }, status: /^$/, disabled: false, calls: ["probe"] },
   { name: "PDF viewer", cfg: { url: "https://example.com/doc.pdf", contentType: "application/pdf" }, status: /PDF/, disabled: true, calls: ["probe"] },
+  { name: "SVG / XML document", cfg: { url: "https://example.com/logo.svg", contentType: "image/svg+xml", html: false }, status: /SVG or XML/, disabled: true, calls: ["probe"] },
   { name: "Probe blocked by Chrome", cfg: { url: "https://example.com/", probeError: "Cannot access contents of the page. Extension manifest must request permission to access the respective host." }, status: PROTECTED, disabled: true, calls: ["probe"] },
   { name: "Error page", cfg: { url: "https://down.example/", probeError: "Frame with ID 0 is showing error page" }, status: /error page/, disabled: true, calls: ["probe"] },
   { name: "Launch + remove", cfg: { url: "https://example.com/" }, status: /Cannon removed/, disabled: false, clicks: 2, calls: ["probe", "inject:content.js", "remove"] },

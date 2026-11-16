@@ -63,6 +63,11 @@ export function startServer() {
       res.end(pngCache.get(key));
       return;
     }
+    if (p === "/logo.svg") {
+      res.writeHead(200, { "content-type": "image/svg+xml" });
+      res.end('<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120"><rect width="200" height="120" fill="#ff6a00"/><text x="20" y="70" font-size="28">SVG</text></svg>');
+      return;
+    }
     if (p === "/doc.pdf") {
       const body = "BT /F1 24 Tf 50 100 Td (Hello PDF) Tj ET";
       const pdf = "%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n" +

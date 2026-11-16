@@ -12,7 +12,7 @@ export const CHROME_PATH = process.env.CHROME_PATH ||
       ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
       : "google-chrome");
 
-export async function launchChrome({ headless = true, width = 1280, height = 800, args = [] } = {}) {
+export async function launchChrome({ headless = true, width = 1280, height = 800, args = [], hideScrollbars = true } = {}) {
   if (typeof WebSocket !== "function") throw new Error("Node 22+ is required (global WebSocket).");
   const userDataDir = mkdtempSync(path.join(tmpdir(), "bbb-perf-"));
   const proc = spawn(CHROME_PATH, [
@@ -20,7 +20,7 @@ export async function launchChrome({ headless = true, width = 1280, height = 800
     "--remote-debugging-port=0",
     `--user-data-dir=${userDataDir}`,
     "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
-    "--disable-component-update", "--disable-sync", "--mute-audio", "--hide-scrollbars",
+    "--disable-component-update", "--disable-sync", "--mute-audio", hideScrollbars ? "--hide-scrollbars" : null,
     "--disable-renderer-backgrounding", "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     `--window-size=${width},${height}`,

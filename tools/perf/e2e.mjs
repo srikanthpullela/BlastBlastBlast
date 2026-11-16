@@ -163,7 +163,8 @@ async function main() {
 
     // Restricted page and PDF: Launch is disabled with a friendly message.
     for (const [name, url, re] of [["chrome:// page", "chrome://version/", /doesn't allow extensions/],
-                                    ["PDF viewer", `${server.origin}/doc.pdf`, /PDF/]]) {
+                                    ["PDF viewer", `${server.origin}/doc.pdf`, /PDF/],
+                                    ["SVG document", `${server.origin}/logo.svg`, /SVG or XML/]]) {
       const t = await openTab(b, url);
       const p = await openPopup(b, extId, t);
       const s = await popupState(b, p);
