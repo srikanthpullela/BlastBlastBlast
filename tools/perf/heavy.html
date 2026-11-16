@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BlastBlastBlast heavy test page</title>
+<style>
+  body { margin: 0; font: 16px/1.55 Georgia, "Times New Roman", serif; color: #1d1d1f; background: #fafaf7; }
+  header { display: flex; align-items: center; gap: 18px; padding: 14px 28px; background: #fff; border-bottom: 1px solid #ddd; }
+  .logo { width: 44px; height: 44px; border-radius: 10px; background-image: linear-gradient(135deg, #ff6a00, #c21500); }
+  nav a { margin-right: 14px; color: #0b57d0; text-decoration: underline; font-family: system-ui, sans-serif; }
+  .icon-btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid #bbb; border-radius: 8px; background: #fff; font: 14px system-ui, sans-serif; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 32px; max-width: 1180px; margin: 0 auto; padding: 24px; }
+  article p { margin: 0 0 1em; text-align: justify; }
+  figure { margin: 1.2em 0; }
+  figure img { display: block; width: 100%; height: 220px; object-fit: cover; border-radius: 6px; }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 24px 0; }
+  .card { background: #fff; border: 1px solid #e3e3e3; border-radius: 10px; padding: 12px; }
+  .card img { width: 100%; height: 110px; object-fit: cover; border-radius: 6px; }
+  .card h3 { margin: 8px 0 4px; font: 600 16px system-ui, sans-serif; }
+  .card p { margin: 0 0 8px; font-size: 14px; }
+  .btn { padding: 6px 12px; border-radius: 6px; border: 0; background: #0b57d0; color: #fff; font: 13px system-ui, sans-serif; }
+  aside { font: 14px/1.5 system-ui, sans-serif; }
+  aside li { margin-bottom: 6px; }
+  table { border-collapse: collapse; width: 100%; font: 13px system-ui, sans-serif; }
+  td, th { border: 1px solid #ddd; padding: 4px 8px; }
+  #fw { padding: 10px; border: 2px dashed #0b57d0; font: 18px system-ui, sans-serif; margin: 16px 0; }
+  .ticker { font: 600 22px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo" title="logo"></div>
+  <nav><a href="#a">News</a><a href="#b">Sport</a><a href="#c">Business</a><a href="#d">Culture</a></nav>
+  <button class="icon-btn"><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="7" cy="7" r="5" fill="none" stroke="#333" stroke-width="2"/><path d="M11 11l4 4" stroke="#333" stroke-width="2"/></svg>Search</button>
+  <button class="icon-btn"><svg width="16" height="16" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="2" fill="#333"/><rect x="2" y="7" width="12" height="2" fill="#333"/><rect x="2" y="11" width="12" height="2" fill="#333"/></svg>Menu</button>
+</header>
+<main>
+  <article id="article">
+    <h1 id="title">The quick brown fox and the heavy page</h1>
+    <figure><img id="hero" alt="hero" src="/img/640x320/1/hero-fallback.png"
+      srcset="/img/640x320/2/hero-1x.png 1x, /img/1280x640/3/hero-2x.png 2x"></figure>
+    <div id="fw"><span id="fw-label">Framework-owned text: </span><span id="fw-slot"></span> <span class="ticker" id="ticker"></span></div>
+  </article>
+  <aside id="aside">
+    <h2>Most read</h2>
+    <ol id="mostread"></ol>
+    <iframe id="xframe" title="cross-origin frame" src="{{XORIGIN}}/frame.html" width="290" height="220" style="border:1px solid #ccc"></iframe>
+    <h2>Data</h2>
+    <table id="table"></table>
+    <canvas id="chart" width="280" height="140"></canvas>
+  </aside>
+</main>
+<script>
+(function () {
+  // Deterministic content so baseline and new builds see the same page.
+  var seed = 12345;
+  function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+  var WORDS = ("lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore " +
+    "et dolore magna aliqua enim ad minim veniam quis nostrud exercitation ullamco laboris nisi aliquip ex ea " +
+    "commodo consequat duis aute irure in reprehenderit voluptate velit esse cillum fugiat nulla pariatur " +
+    "excepteur sint occaecat cupidatat non proident sunt culpa qui officia deserunt mollit anim id est laborum").split(" ");
+  function sentence(n) {
+    var out = [];
+    for (var i = 0; i < n; i++) out.push(WORDS[Math.floor(rnd() * WORDS.length)]);
+    out[0] = out[0][0].toUpperCase() + out[0].slice(1);
+    return out.join(" ") + ".";
+  }
+  var article = document.getElementById("article");
+  var fw = document.getElementById("fw");
+  for (var p = 0; p < 40; p++) {
+    var para = document.createElement("p");
+    var html = "";
+    for (var s = 0; s < 7; s++) {
+      var t = sentence(8 + Math.floor(rnd() * 10));
+      if (s === 2) t = t.replace(/(\w+) (\w+)/, "<a href=\"#x\">$1</a> <b>$2</b>");
+      if (s === 5) t = t.replace(/(\w+)\.$/, "<em>$1</em>.");
+      html += t + " ";
+    }
+    para.innerHTML = html;
+    article.appendChild(para);
+    if (p % 4 === 1) {
+      var fig = document.createElement("figure");
+      var k = p + 10;
+      if (p === 5) {
+        fig.innerHTML = '<img alt="quote" src="/img/600x300/' + k + '/it\'s-a-quote.png">';
+      } else if (p % 8 === 1) {
+        fig.innerHTML = '<img alt="srcset" src="/img/600x300/' + k + '/fallback.png" srcset="/img/600x300/' + (k + 100) + '/one-x.png 1x, /img/1200x600/' + (k + 200) + '/two-x.png 2x">';
+      } else {
+        fig.innerHTML = '<img alt="plain" src="/img/600x300/' + k + '/plain.png">';
+      }
+      article.appendChild(fig);
+    }
+    if (p === 12) {
+      var cards = document.createElement("div");
+      cards.className = "cards";
+      for (var c = 0; c < 12; c++) {
+        cards.insertAdjacentHTML("beforeend",
+          '<div class="card"><img alt="card" src="/img/300x200/' + (300 + c) + '/card.png">' +
+          '<h3>Card title ' + (c + 1) + '</h3><p>' + sentence(10) + '</p>' +
+          '<button class="btn"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 6h8M6 2v8" stroke="#fff" stroke-width="2"/></svg> Read more</button></div>');
+      }
+      article.appendChild(cards);
+    }
+  }
+  var ol = document.getElementById("mostread");
+  for (var i = 0; i < 12; i++) ol.insertAdjacentHTML("beforeend", "<li><a href=\"#m\">" + sentence(6) + "</a></li>");
+  var table = document.getElementById("table");
+  for (var r = 0; r < 30; r++) table.insertAdjacentHTML("beforeend", "<tr><td>Row " + r + "</td><td>" + Math.floor(rnd() * 1000) + "</td><td>" + WORDS[r % WORDS.length] + "</td></tr>");
+  var cv = document.getElementById("chart").getContext("2d");
+  for (var b = 0; b < 14; b++) { cv.fillStyle = "hsl(" + (b * 25) + ",70%,50%)"; cv.fillRect(b * 20, 140 - 20 - rnd() * 100, 16, 140); }
+
+  // A tiny "framework" that owns text nodes and re-renders them, like React does.
+  window.__fwErrors = [];
+  var slot = document.getElementById("fw-slot");
+  var node = document.createTextNode("Hello from a component that re-renders often");
+  slot.appendChild(node);
+  var ticker = document.createTextNode("0000");
+  document.getElementById("ticker").appendChild(ticker);
+  var n = 0;
+  setInterval(function () {
+    try {
+      var next = document.createTextNode("Hello from a component that re-renders often");
+      slot.replaceChild(next, node);   // throws if someone replaced our node
+      node = next;
+    } catch (e) { window.__fwErrors.push(String(e && e.name)); }
+    try { ticker.data = String(1000 + (++n % 9000)); } catch (e) { window.__fwErrors.push(String(e && e.name)); }
+  }, 400);
+}());
+</script>
+</body>
+</html>

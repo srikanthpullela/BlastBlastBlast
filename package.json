@@ -1,0 +1,14 @@
+{
+  "name": "blastblastblast",
+  "private": true,
+  "description": "Dev scripts for the BlastBlastBlast Chrome extension (not shipped).",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "package": "node tools/package.mjs",
+    "check": "node tools/perf/check.mjs",
+    "e2e": "node tools/perf/e2e.mjs",
+    "perf": "node tools/perf/run.mjs",
+    "test:popup": "node tools/perf/popup-test.mjs"
+  }
+}

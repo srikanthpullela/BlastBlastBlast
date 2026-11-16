@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Embedded frame</title>
+<style>body{margin:0;font:14px system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;height:100vh}</style>
+</head>
+<body>
+<div id="msg">Cross-origin embed (like a video player)</div>
+<script>
+  // Counts pointer presses that land inside this frame instead of the game.
+  window.__presses = 0;
+  addEventListener("pointerdown", function () { window.__presses++; document.getElementById("msg").textContent = "pressed " + window.__presses; });
+</script>
+</body>
+</html>

@@ -10,7 +10,7 @@ import zlib
 import math
 import os
 
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icons")
 
 
 def lerp(a, b, t):
