@@ -1,9 +1,12 @@
 #!/usr/bin/env node
-// Builds dist/blastblastblast-<version>.zip containing only the files the
-// extension needs at runtime (no dev tools, docs or git metadata). No deps.
+// Builds, from only the files the extension needs at runtime (no dev tools,
+// docs or git metadata), with no dependencies:
+//   dist/blastblastblast-<version>/      unpacked — chrome://extensions → Load unpacked
+//   dist/blastblastblast-<version>.zip   upload to the Chrome Web Store
+// Older builds in dist/ are removed first.
 //
 //   node tools/package.mjs
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
@@ -78,9 +81,22 @@ function zip(entries) {
   return Buffer.concat([...locals, cd, end]);
 }
 
-const out = path.join(ROOT, "dist", `blastblastblast-${manifest.version}.zip`);
-mkdirSync(path.dirname(out), { recursive: true });
-const bytes = zip(RUNTIME_FILES.map((name) => ({ name, data: readFileSync(path.join(ROOT, name)) })));
+const DIST = path.join(ROOT, "dist");
+mkdirSync(DIST, { recursive: true });
+for (const old of readdirSync(DIST)) {
+  if (/^blastblastblast-/.test(old)) rmSync(path.join(DIST, old), { recursive: true, force: true });
+}
+
+const name = `blastblastblast-${manifest.version}`;
+const files = RUNTIME_FILES.map((f) => ({ name: f, data: readFileSync(path.join(ROOT, f)) }));
+const folder = path.join(DIST, name);
+for (const f of files) {
+  mkdirSync(path.dirname(path.join(folder, f.name)), { recursive: true });
+  writeFileSync(path.join(folder, f.name), f.data);
+}
+const out = path.join(DIST, name + ".zip");
+const bytes = zip(files);
 writeFileSync(out, bytes);
-console.log(`${path.relative(ROOT, out)}  (${RUNTIME_FILES.length} files, ${(bytes.length / 1024).toFixed(1)} KB)`);
+console.log(`${path.relative(ROOT, folder)}/   (unpacked, for Load unpacked)`);
+console.log(`${path.relative(ROOT, out)}  (${RUNTIME_FILES.length} files, ${(bytes.length / 1024).toFixed(1)} KB, for upload)`);
 for (const f of RUNTIME_FILES) console.log("  " + f);

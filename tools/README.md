@@ -4,7 +4,7 @@ Nothing in this folder ships in the extension.
 
 | Command | What it does |
 | --- | --- |
-| `node tools/package.mjs` | Builds `dist/blastblastblast-<version>.zip` with only the runtime files (manifest, popup, content script, icons). |
+| `node tools/package.mjs` | Builds `dist/blastblastblast-<version>/` (unpacked, for **Load unpacked**) and `dist/blastblastblast-<version>.zip` (for the Chrome Web Store) with only the runtime files: manifest, popup, content script, icons. Older builds in `dist/` are removed. |
 | `node tools/perf/check.mjs` | Functional checks on a heavy test page for v1.2.1 (from git) and the working tree: text blasting without reflow, images without network requests, page-anchored marks, iframe click-through, debounced saves, complete teardown and relaunch. `--shots <dir>` saves screenshots. |
 | `node tools/perf/run.mjs` | Perf comparison: rapid cannon fire, gun hold-fire, Danger swarm and (new builds) every arsenal weapon against enemy vehicles (`--only arsenal`). Reports frame times, long tasks, layout shift and layout/style/script time. Options: `--cpu 4` (CPU throttling), `--dpr 2`, `--runs 3`, `--only cannon`, `--json out.json`. |
 | `node tools/perf/popup-test.mjs` | Popup logic with a mocked `chrome.*` API (restricted pages, friendly errors, launch/remove). |
@@ -16,5 +16,5 @@ The perf tools need Node 22+ and Google Chrome (set `CHROME_PATH` if it isn't in
 ## Loading the unpacked build
 
 1. Open `chrome://extensions` and turn on **Developer mode**.
-2. Click **Load unpacked** and select the repository root (the folder with `manifest.json`).
+2. Click **Load unpacked** and select `dist/blastblastblast-<version>/` (after `node tools/package.mjs`), or the repository root.
 3. Pin BlastBlastBlast, open any website and click the icon → **Launch Cannon!**
