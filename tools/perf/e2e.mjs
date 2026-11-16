@@ -125,6 +125,15 @@ async function tabEscape(b, tab) {
   }
 }
 
+// Types text into whatever has focus in the tab.
+async function typeText(b, tab, text) {
+  for (const ch of text) {
+    const code = /\d/.test(ch) ? "Digit" + ch : "Key" + ch.toUpperCase(), vk = ch.toUpperCase().charCodeAt(0);
+    await b.send("Input.dispatchKeyEvent", { type: "keyDown", key: ch, code, text: ch, windowsVirtualKeyCode: vk }, tab.sessionId);
+    await b.send("Input.dispatchKeyEvent", { type: "keyUp", key: ch, code, windowsVirtualKeyCode: vk }, tab.sessionId);
+  }
+}
+
 // Evaluates in the extension's service worker.
 async function swEval(b, extId, expression) {
   const sw = (await b.send("Target.getTargets")).targetInfos.find((t) => t.type === "service_worker" && t.url.startsWith("chrome-extension://" + extId));
@@ -222,10 +231,31 @@ async function main() {
     const cmd = cmds.find((c) => c.name === "toggle-game");
     record("Launch shortcut is registered", !!(cmd && cmd.shortcut), cmd ? `${cmd.shortcut} — ${cmd.description}` : "missing");
     const t2 = await openTab(b, `${server.origin}/heavy.html`);
+    // Text fields inside web components (open and closed shadow roots), like many sites' search boxes.
+    await evaluate(b, t2.sessionId, `(function () {
+      ["open", "closed"].forEach(function (mode) {
+        var host = document.createElement("x-field-" + mode), input = document.createElement("input");
+        host.attachShadow({ mode: mode }).appendChild(input);
+        document.body.prepend(host);
+        window["__" + mode + "Field"] = input;
+      });
+      __openField.focus();
+    })()`);
     await pressShortcut(b, t2);
     await sleep(1200);
     const viaKey = await evaluate(b, t2.sessionId, `!!document.getElementById("__cannon_wrapper")`);
     record("Shortcut launches the game on a new page (activeTab, no popup)", viaKey);
+    // The game's letter and number keys must not swallow typing in those fields.
+    await typeText(b, t2, "dmg2");
+    await evaluate(b, t2.sessionId, "__closedField.focus()");
+    await typeText(b, t2, "dmg2");
+    const typed = await evaluate(b, t2.sessionId, `({ open: __openField.value, closed: __closedField.value,
+      weapon: document.getElementById("__cb_arsenal").firstChild.textContent,
+      dangerOff: /OFF/.test(document.getElementById("__cb_danger_btn").textContent),
+      sound: document.querySelector('button[title*="press M"]').textContent })`);
+    await evaluate(b, t2.sessionId, "__closedField.blur()");
+    record("Typing in fields inside web components goes to the field, not the game",
+      typed.open === "dmg2" && typed.closed === "dmg2" && /CANNON/.test(typed.weapon) && typed.dangerOff && typed.sound === "🔊", JSON.stringify(typed));
     await tabClick(b, t2, 520, 300);
     await sleep(1700);
     await pressShortcut(b, t2);

@@ -342,7 +342,35 @@ async function runChecks(browser, server, variant) {
       p.close();
     }
     recordNew("The intro fits short windows (nothing covers its button)", fits.every((f) => f.ok), fits.map((f) => `${f.size}: ${f.detail}`).join("; "));
-  } else recordNew("The intro fits short windows (nothing covers its button)");
+
+    // A hidden tab runs no animation frames, but its audio keeps playing: switching tabs
+    // while holding the flamethrower must silence it and release the trigger.
+    const p = await openPage(browser, `${server.origin}/heavy.html`);
+    const pctx = await injectGame(p, variant, { audioProbe: true, launch: LAUNCH });
+    await sleep(300);
+    await useWeapon(p, 4);
+    await mouse(p, "mouseMoved", 420, 320);
+    await mouse(p, "mousePressed", 420, 320);
+    await sleep(700);
+    const firing = await audioStats(p, pctx);
+    const other = await browser.newPage();
+    await other.send("Page.bringToFront");
+    await sleep(2000);
+    const hiddenTab = await p.eval("document.visibilityState") === "hidden";
+    const away = await audioStats(p, pctx);
+    await p.send("Page.bringToFront");
+    await sleep(700);
+    const back = await audioStats(p, pctx);
+    await mouse(p, "mouseReleased", 420, 320);
+    page.errors.push(...p.errors);
+    for (const t of [other, p]) { await t.send("Page.close").catch(() => {}); t.close(); }
+    recordNew("Switching tabs silences the game and releases held fire",
+      firing.state === "running" && firing.live > 0 && hiddenTab && away.state === "suspended" && away.live === 0 && back.state === "running" && back.live === 0,
+      `flamethrower held: audio ${firing.state}, ${firing.live} live source(s); other tab in front: audio ${away.state}, ${away.live} live; back: audio ${back.state}, ${back.live} live`);
+  } else {
+    recordNew("The intro fits short windows (nothing covers its button)");
+    recordNew("Switching tabs silences the game and releases held fire");
+  }
   record("No script errors", page.errors.length === 0, page.errors.length ? page.errors.slice(0, 3).join(" | ") : "none");
   await page.send("Page.close").catch(() => {});
   page.close();

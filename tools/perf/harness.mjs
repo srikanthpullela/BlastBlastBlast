@@ -89,6 +89,8 @@ export const AUDIO_PROBE = `(function () {
   function Probe(opts) {
     var ac = new Orig(opts);
     A.contexts++;
+    A.state = ac.state;
+    ac.addEventListener("statechange", function () { A.state = ac.state; });
     var tap = ac.createGain(), an = ac.createAnalyser();
     an.fftSize = 1024;
     tap.connect(ac.destination); tap.connect(an);

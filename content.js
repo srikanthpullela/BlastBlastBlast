@@ -442,6 +442,22 @@
     }
     function stopLoops() { for (var k in loops) stopLoop(k); }
 
+    // The tab was hidden: no frames run there, but audio does. Stop the loops now and
+    // suspend the context once they have faded out; wake() resumes it when the tab is back.
+    var sleepTimer = 0, asleep = false;
+    function pause() {
+      stopLoops();
+      clearTimeout(sleepTimer);
+      sleepTimer = setTimeout(function () {
+        if (document.hidden && ac && ac.state === "running") { asleep = true; ac.suspend()["catch"](function () {}); }
+      }, 300);
+    }
+    function wake() {
+      clearTimeout(sleepTimer);
+      if (asleep && ac && !muted) ac.resume()["catch"](function () {});
+      asleep = false;
+    }
+
     function setMuted(m) {
       muted = !!m;
       if (muted) stopLoops();
@@ -454,13 +470,15 @@
     // Ends all sound; the context closes once the last notes have rung out.
     function shutdown(afterMs) {
       stopLoops();
+      clearTimeout(sleepTimer);
+      asleep = false;
       var a = ac;
       ac = null;
       if (a) setTimeout(function () { a.close()["catch"](function () {}); }, afterMs || 0);
     }
 
     return { create: create, start: start, play: play, loop: loop, setMuted: setMuted,
-             muted: function () { return muted; }, shutdown: shutdown };
+             muted: function () { return muted; }, pause: pause, wake: wake, shutdown: shutdown };
   }());
 
   /* ── STYLE SHEET (removed again on teardown) ─────────────────────────────── */
@@ -3547,13 +3565,25 @@
   /* ── EVENTS ──────────────────────────────────────────────────────────────── */
   function onResize() { resizeCanvas(); }
   window.addEventListener("resize", onResize);
+  // True if the key goes into a text field. Inside a web component the event's target
+  // is the outer element, so follow the focus into its shadow root (closed roots are
+  // only reachable through chrome.dom).
+  function typingInField(e) {
+    var t = (e.composedPath && e.composedPath()[0]) || e.target;
+    for (var depth = 0; t && depth < 10; depth++) {
+      if (t.isContentEditable || /^(input|textarea|select)$/.test(t.localName || "")) return true;
+      var root = t.shadowRoot;
+      if (!root) { try { root = chrome.dom.openOrClosedShadowRoot(t); } catch (err) { root = null; } }
+      t = root && root.activeElement;
+    }
+    return false;
+  }
   // Esc exits; 1–6 / G (Shift+G back) pick a weapon, D toggles Danger, M mutes.
   // Other keys, and keys typed into fields, are left to the page.
   function onKey(e) {
     if (e.key === "Escape" || e.keyCode === 27) { destroy(); return; }
     if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || !e.key || e.key.length !== 1) return;
-    var t = e.target;
-    if (t && (t.isContentEditable || /^(input|textarea|select)$/.test(t.localName || ""))) return;
+    if (typingInField(e)) return;
     var k = e.key.toLowerCase(), idx = "123456".indexOf(k);
     if (idx >= 0) selectWeapon(WEAPONS[idx].id);
     else if (k === "g") cycleWeapon(e.shiftKey ? -1 : 1);
@@ -3564,6 +3594,13 @@
     e.stopPropagation();
   }
   window.addEventListener("keydown", onKey, true);
+
+  // A hidden tab runs no animation frames, so release held fire and pause the sound there.
+  function onVisibility() {
+    if (document.hidden) { endFire(); sfx.pause(); }
+    else sfx.wake();
+  }
+  document.addEventListener("visibilitychange", onVisibility);
 
   // Pointer move only records the cursor; the aim math runs once per frame.
   function onGlobalMove(e) { mouseX = e.clientX; mouseY = e.clientY; }
@@ -3755,6 +3792,7 @@
     clearTimeout(vigOffTimer);
     window.removeEventListener("resize", onResize);
     window.removeEventListener("keydown", onKey, true);
+    document.removeEventListener("visibilitychange", onVisibility);
     window.removeEventListener("pointermove", onGlobalMove, true);
     window.removeEventListener("pointerdown", onFirePointerDown, true);
     window.removeEventListener("pointerup",   onFirePointerUp, true);
