@@ -6,7 +6,7 @@
 import { writeFileSync } from "node:fs";
 import { launchChrome, sleep } from "./cdp.mjs";
 import { startServer } from "./server.mjs";
-import { loadVariants, openPage, injectGame, mouse, click, centerOf, prng } from "./harness.mjs";
+import { loadVariants, openPage, injectGame, mouse, click, centerOf, prng, useWeapon } from "./harness.mjs";
 
 const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf("--" + name); return i >= 0 ? args[i + 1] : def; };
@@ -30,8 +30,7 @@ async function scenarioCannon(page, rand, { seconds = 10, rate = 9 } = {}) {
 }
 
 async function scenarioGun(page, rand, { seconds = 6 } = {}) {
-  const btn = await centerOf(page, "#__cb_mode_btn");
-  await click(page, btn.x, btn.y);
+  await useWeapon(page, 2);
   await sleep(200);
   const t0 = Date.now();
   let x = 200, y = 200;
@@ -45,7 +44,7 @@ async function scenarioGun(page, rand, { seconds = 6 } = {}) {
     await sleep(16);
   }
   await mouse(page, "mouseReleased", x, y);
-  await click(page, btn.x, btn.y);   // back to cannon
+  await useWeapon(page, 1);   // back to cannon
   await sleep(500);
 }
 
@@ -59,14 +58,43 @@ async function scenarioDanger(page, rand) {
   await sleep(500);
 }
 
-const SCENARIOS = { cannon: scenarioCannon, gun: scenarioGun, danger: scenarioDanger };
+// Every new weapon in turn, during a Danger swarm with enemy tanks and bombers.
+async function holdSweep(page, seconds) {
+  const t0 = Date.now();
+  await mouse(page, "mouseMoved", 300, 260);
+  await mouse(page, "mousePressed", 300, 260);
+  let x = 300, y = 260;
+  while (Date.now() - t0 < seconds * 1000) {
+    const t = (Date.now() - t0) / 1000;
+    x = 470 + Math.sin(t * 1.3) * 360; y = 250 + Math.sin(t * 2.1) * 150;
+    await mouse(page, "mouseMoved", x, y, { held: true });
+    await sleep(16);
+  }
+  await mouse(page, "mouseReleased", x, y);
+}
+async function scenarioArsenal(page, rand) {
+  if (!(await useWeapon(page, 3))) return null;      // v1.2.1 has no arsenal
+  const btn = await centerOf(page, "#__cb_danger_btn");
+  await click(page, btn.x, btn.y);
+  await sleep(1500);
+  await holdSweep(page, 5);                          // rockets
+  await useWeapon(page, 4); await holdSweep(page, 5);   // flamethrower
+  await useWeapon(page, 5); await holdSweep(page, 5);   // laser
+  await useWeapon(page, 6);                          // cluster bombs
+  await scenarioCannon(page, rand, { seconds: 5, rate: 2 });
+  await useWeapon(page, 1);
+  await click(page, btn.x, btn.y);
+  await sleep(500);
+}
+
+const SCENARIOS = { cannon: scenarioCannon, gun: scenarioGun, danger: scenarioDanger, arsenal: scenarioArsenal };
 
 function pct(sorted, p) { return sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(p / 100 * sorted.length))] : 0; }
 
 async function measure(page, fn, rand) {
   const m0 = await page.send("Performance.getMetrics");
   const t0 = await page.eval("performance.now()");
-  await fn(page, rand);
+  if (await fn(page, rand) === null) return null;
   const t1 = await page.eval("performance.now()");
   const m1 = await page.send("Performance.getMetrics");
   const perf = await page.eval(`(function(){ var p = window.__perf; return {
@@ -115,6 +143,7 @@ async function main() {
           await injectGame(page, v);
           await sleep(400);
           const r = await measure(page, SCENARIOS[scen], prng(1000 + run));
+          if (!r) { await page.send("Page.close").catch(() => {}); page.close(); continue; }
           r.errors = page.errors.length;
           if (page.errors.length) process.stderr.write(`  script errors: ${page.errors.slice(0, 3).join(" | ")}\n`);
           ((results[scen] ||= {})[v.name] ||= []).push(r);

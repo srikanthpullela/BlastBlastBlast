@@ -132,7 +132,7 @@ async function main() {
     if (intro) await evaluate(b, tab.sessionId, `document.getElementById("__cbIntroOk").click()`);
     await sleep(300);
     const stored = { data: await evaluate(b, popup.sessionId, `chrome.storage.local.get(null)`) };
-    record("First-run intro shows once and is remembered", intro && stored.data && stored.data.cbIntroSeen === true, JSON.stringify(stored.data));
+    record("First-run intro shows once and is remembered", intro && stored.data && !!stored.data.cbIntroSeen, JSON.stringify(stored.data));
 
     // Clicks over the cross-origin iframe should fire the cannon.
     await evaluate(b, tab.sessionId, `document.getElementById("xframe").scrollIntoView({ block: "center" })`);

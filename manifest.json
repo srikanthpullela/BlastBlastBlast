@@ -8,7 +8,7 @@
       "default_popup": "popup.html"
    },
    "content_scripts": [  ],
-   "description": "Blast any webpage to pieces! Fire a cannon, shoot soldiers, watch elements explode with real physics. Pure chaos, pure fun.",
+   "description": "Blast any webpage to pieces! Fire cannons, rockets, flamethrowers and lasers at soldiers and enemy tanks. Pure chaos, pure fun.",
    "icons": {
       "128": "icons/icon128.png",
       "16": "icons/icon16.png",
@@ -17,5 +17,5 @@
    "manifest_version": 3,
    "name": "BlastBlastBlast",
    "permissions": [ "scripting", "activeTab", "storage" ],
-   "version": "1.3.0"
+   "version": "1.4.0"
 }

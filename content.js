@@ -2,9 +2,10 @@
  * BlastBlastBlast — content.js
  * Injected on demand into the top frame of the active tab (see popup.js).
  *
- *  - Overlay: fixed full-viewport canvas, SVG tank, Cannon/Gun and Danger
- *    toggles, HUD (kills / best / stolen) and raiding soldiers.
- *  - BLAST_RADIUS is 45px. Blast marks are anchored to the page, so they
+ *  - Overlay: fixed full-viewport canvas, SVG tank, arsenal (Cannon, Gun,
+ *    Rockets, Flamethrower, Laser, Cluster bomb; keys 1–6) and Danger toggle,
+ *    HUD (score / best / stolen), raiding soldiers, enemy tanks and bombers.
+ *  - Cannon BLAST_RADIUS is 45px. Blast marks are anchored to the page, so they
  *    scroll with it, and fade out after about 60s.
  *  - Blasted text is hidden with the CSS Custom Highlight API: page text is
  *    never rewritten, so nothing reflows. Flying characters, image fragments
@@ -53,7 +54,7 @@
   var balls      = [];
   var bullets    = [];        // straight-line gun bullets
   var bloodDrops = [];        // blood splatters that linger then fade
-  var mode       = "cannon";  // "cannon" | "gun"
+  var mode       = "cannon";  // weapon id from WEAPONS
   var particles  = [];
   var shockwaves = [];
   var mFlashes   = [];
@@ -74,6 +75,40 @@
   var targetY    = 0;
   var hasAim     = false;
 
+  /* ── ARSENAL ─────────────────────────────────────────────────────────────────
+     Cannon and Gun are the classic weapons. The others unlock with lifetime
+     score (kept on-device as cbTotalKills). Keys 1–6 pick a weapon. */
+  var WEAPONS = [
+    { id: "cannon",  icon: "💣", name: "CANNON",       unlock: 0  },
+    { id: "gun",     icon: "🔫", name: "GUN",          unlock: 0  },
+    { id: "rocket",  icon: "🚀", name: "ROCKETS",      unlock: 10 },
+    { id: "flame",   icon: "🔥", name: "FLAMETHROWER", unlock: 25 },
+    { id: "laser",   icon: "⚡", name: "LASER",        unlock: 50 },
+    { id: "cluster", icon: "💥", name: "CLUSTER BOMB", unlock: 80 }
+  ];
+  var ROCKET_COOLDOWN  = 0.45;  // s between rockets (hold to keep firing)
+  var CLUSTER_COOLDOWN = 0.8;   // s between cluster bombs
+  var FLAME_RANGE      = 330;   // px the flame stream reaches
+  var rockets    = [];
+  var bomblets   = [];          // cluster sub-munitions
+  var flames     = [];          // flamethrower particles
+  var laserBeam  = null;        // { x0, y0, x1, y1 } while the laser fires
+  var weaponCd   = 0;           // rocket / cluster cooldown
+  var flameBurnT = 0;
+  var laserCarveT = 0, lastCarve = null;
+  var totalBase  = 0;           // lifetime score from earlier sessions
+  var unlocksKnown = false;     // stored progress loaded (avoid announcing old unlocks)
+
+  /* ── ENEMY VEHICLES ──────────────────────────────────────────────────────── */
+  var enemies     = [];         // tanks and bombers
+  var enemyShots  = [];         // tank shells (arcs) and bomber bombs (drops)
+  var tankTimer   = 45;         // s until the first enemy tank
+  var bomberTimer = 75;         // s until the first bomber
+
+  /* ── COMBOS ──────────────────────────────────────────────────────────────── */
+  var comboCount = 0, comboT = 0;
+  var COMBO_WINDOW = 1.1;       // s between kills to keep a combo going
+
   // Layout values, refreshed once per frame in readPhase() (or on resize).
   var viewW    = window.innerWidth;
   var viewH    = window.innerHeight;
@@ -92,7 +127,7 @@
      Holding the mouse down in gun mode auto-fires bullets at a steady rate
      (cannon stays single-shot per click since the arc is deliberately slow). */
   var GUN_FIRE_INTERVAL = 0.06; // sec between auto-fired bullets (~16/sec)
-  var gunHeld           = false;
+  var held              = false; // pointer is held down (gun, rockets, flame, laser keep firing)
   var gunFireCd         = 0;
   var introActive       = false; // true while the first-launch intro is up — game paused
 
@@ -149,7 +184,29 @@
     "@keyframes cbMarkIn{from{transform:scale(.3);opacity:0}to{transform:scale(1);opacity:1}}",
     ".__cb_mark{position:absolute;pointer-events:none;animation:cbMarkIn .2s ease-out;max-width:none!important;max-height:none!important;" +
       "min-width:0!important;min-height:0!important;margin:0!important;padding:0!important;border:0!important;box-sizing:content-box!important}",
-    ".__cb_mark.__cb_fading{opacity:0;transition:opacity var(--cb-fade,10s) linear}"
+    ".__cb_mark.__cb_fading{opacity:0;transition:opacity var(--cb-fade,10s) linear}",
+    // Arsenal panel (left of the cannon). `all:unset` keeps page button styles out.
+    "#__cb_arsenal{position:fixed;bottom:50px;right:calc(50% + 82px);z-index:2147483647;pointer-events:all;" +
+      "display:flex;flex-direction:column;align-items:center;gap:5px;padding:7px 8px 8px;" +
+      "background:rgba(14,16,11,.96);border:2px solid rgba(255,210,74,.85);border-radius:16px;" +
+      "box-shadow:0 4px 18px rgba(0,0,0,.5);color:#ffd24a;font:800 11px/1.1 system-ui,sans-serif;" +
+      "letter-spacing:.4px;white-space:nowrap;user-select:none;-webkit-user-select:none;transition:transform .18s ease,filter .18s ease}",
+    "#__cb_arsenal:hover{transform:translateY(-3px);filter:brightness(1.1)}",
+    "#__cb_arsenal .__cb_grid{display:grid;grid-template-columns:repeat(3,36px);gap:5px}",
+    "#__cb_arsenal .__cb_chip{all:unset;box-sizing:border-box;position:relative;display:flex;align-items:center;" +
+      "justify-content:center;width:36px;height:34px;border-radius:9px;border:1px solid rgba(255,255,255,.16);" +
+      "background:rgba(255,255,255,.06);font:19px/1 system-ui,'Apple Color Emoji','Segoe UI Emoji',sans-serif;" +
+      "cursor:pointer;transition:transform .12s ease,background .15s,border-color .15s}",
+    "#__cb_arsenal .__cb_chip:hover{transform:translateY(-2px) scale(1.07);background:rgba(255,255,255,.14)}",
+    "#__cb_arsenal .__cb_chip.__cb_on{border:2px solid #ffd24a;background:rgba(255,210,74,.22)}",
+    "#__cb_arsenal .__cb_chip.__cb_on::before{content:'';position:absolute;inset:-4px;border-radius:12px;" +
+      "border:2px solid rgba(255,210,74,.75);pointer-events:none;will-change:transform,opacity;animation:cbRing 1.6s ease-out infinite}",
+    "#__cb_arsenal .__cb_chip.__cb_locked{opacity:.42;cursor:not-allowed;filter:grayscale(.7)}",
+    "#__cb_arsenal .__cb_k{position:absolute;left:3px;top:2px;font:700 8px/1 system-ui,sans-serif;color:#fff;opacity:.55}",
+    "#__cb_arsenal .__cb_lock{display:none;position:absolute;right:-4px;bottom:-5px;font-size:11px}",
+    "#__cb_arsenal .__cb_chip.__cb_locked .__cb_lock{display:block}",
+    "#__cb_arsenal .__cb_chip.__cb_new{animation:cbChipNew .6s ease-out 3}",
+    "@keyframes cbChipNew{0%,100%{transform:scale(1)}40%{transform:scale(1.35)}}"
   ].join("\n");
   document.documentElement.appendChild(styleEl);
   removeList.push(styleEl);
@@ -245,45 +302,49 @@
     btn.style.setProperty("--cb-ring-anim", anim);
   }
 
-  /* ── WEAPON MODE TOGGLE (sits just left of the cannon) ──────────────────── */
-  var modeBtn = document.createElement("button");
-  modeBtn.id = "__cb_mode_btn";
-  modeBtn.className = "__cb_toggle";
-  modeBtn.setAttribute("data-cb-ui", "1");
-  modeBtn.style.cssText = [
-    "position:fixed;bottom:54px;right:calc(50% + 82px);",
-    "background:rgba(14,16,11,0.96);color:#ffd24a;",
-    "border:2px solid rgba(255,210,74,0.85);border-radius:16px;",
-    "padding:10px 16px;min-width:110px;",
-    "font:700 14px system-ui,sans-serif;letter-spacing:.3px;",
-    "cursor:pointer;z-index:2147483647;pointer-events:all;",
-    "display:flex;flex-direction:column;align-items:center;gap:3px;",
-    "box-shadow:0 4px 18px rgba(0,0,0,.5);white-space:nowrap;",
-    "transition:transform .18s ease,filter .18s ease,border-color .2s,background .2s;"
-  ].join("");
+  /* ── ARSENAL (weapon picker, sits just left of the cannon) ───────────────── */
+  var arsenal = document.createElement("div");
+  arsenal.id = "__cb_arsenal";
+  arsenal.setAttribute("data-cb-ui", "1");
+  var arsenalLabel = document.createElement("div");
+  arsenal.appendChild(arsenalLabel);
+  var chipGrid = document.createElement("div");
+  chipGrid.className = "__cb_grid";
+  arsenal.appendChild(chipGrid);
+  var chips = WEAPONS.map(function (w, i) {
+    var b = document.createElement("button");
+    b.className = "__cb_chip";
+    b.setAttribute("data-weapon", w.id);
+    b.setAttribute("data-cb-ui", "1");
+    b.innerHTML = '<span class="__cb_k">' + (i + 1) + '</span>' + w.icon + '<span class="__cb_lock">🔒</span>';
+    b.addEventListener("click", function (e) {
+      e.preventDefault(); e.stopPropagation();
+      selectWeapon(w.id);
+    });
+    chipGrid.appendChild(b);
+    return b;
+  });
 
-  // Button always shows what you'll switch TO (not current state)
-  function renderModeBtn() {
-    if (mode === "cannon") {
-      modeBtn.innerHTML =
-        '<span style="font-size:28px;line-height:1.1">🔫</span>' +
-        '<span style="font-size:13px;font-weight:800;letter-spacing:.5px">GUN MODE</span>' +
-        '<span style="font-size:10px;opacity:.6;font-weight:600">tap to switch</span>';
-      modeBtn.style.borderColor = "rgba(255,210,74,0.85)";
-      modeBtn.style.color = "#ffd24a";
-      setRing(modeBtn, "rgba(255,210,74,0.7)", "cbRing 2s ease-out infinite");
-    } else {
-      modeBtn.innerHTML =
-        '<span style="font-size:28px;line-height:1.1">💣</span>' +
-        '<span style="font-size:13px;font-weight:800;letter-spacing:.5px">CANNON</span>' +
-        '<span style="font-size:10px;opacity:.6;font-weight:600">tap to switch</span>';
-      modeBtn.style.borderColor = "rgba(255,140,30,0.9)";
-      modeBtn.style.color = "#ff9a20";
-      setRing(modeBtn, "rgba(255,140,30,0.8)", "cbRing 1.4s ease-out infinite");
+  function weaponById(id) {
+    for (var i = 0; i < WEAPONS.length; i++) if (WEAPONS[i].id === id) return WEAPONS[i];
+    return null;
+  }
+  function totalScore() { return totalBase + score; }
+  function isUnlocked(w) { return totalScore() >= w.unlock; }
+
+  function renderArsenal() {
+    var cur = weaponById(mode);
+    setText(arsenalLabel, cur.icon + " " + cur.name);
+    for (var i = 0; i < chips.length; i++) {
+      var w = WEAPONS[i], c = chips[i], open = isUnlocked(w);
+      c.classList.toggle("__cb_on", w.id === mode);
+      c.classList.toggle("__cb_locked", !open);
+      var title = w.name + " · key " + (i + 1) + (open ? "" : " · unlocks at " + w.unlock + " points");
+      if (c.title !== title) c.title = title;
     }
   }
 
-  // Gun mode shows a crosshair cursor; remember the page's own inline cursor.
+  // Gun-style weapons show a crosshair cursor; remember the page's own inline cursor.
   var htmlStyle = document.documentElement.style;
   var origStyleAttr = document.documentElement.getAttribute("style");
   var origCursor = htmlStyle.getPropertyValue("cursor");
@@ -295,20 +356,23 @@
       document.documentElement.removeAttribute("style");
     }
   }
-  function setMode(m) {
-    mode = m;
-    renderModeBtn();
+  function isLobbed(m) { return m === "cannon" || m === "cluster"; }
+  function selectWeapon(id) {
+    var w = weaponById(id);
+    if (!w || id === mode) return;
+    if (!isUnlocked(w)) {
+      spawnFloater(viewW / 2 - 170, viewH - 175, "🔒 " + w.name + ": " + (w.unlock - totalScore()) + " more points", "#ffd24a", 14);
+      return;
+    }
+    mode = id;
+    held = false;
     hasAim = false; aimPower = 0;
-    if (mode === "gun") htmlStyle.setProperty("cursor", "crosshair");
-    else restoreCursor();
+    laserBeam = null; lastCarve = null;
+    renderArsenal();
+    if (isLobbed(mode)) restoreCursor();
+    else htmlStyle.setProperty("cursor", "crosshair");
   }
-  modeBtn.addEventListener("click", function(e) {
-    e.preventDefault(); e.stopPropagation();
-    setMode(mode === "cannon" ? "gun" : "cannon");
-  });
-  modeBtn.addEventListener("mouseenter", function(){ modeBtn.style.transform = "translateY(-4px) scale(1.06)"; modeBtn.style.filter = "brightness(1.15)"; });
-  modeBtn.addEventListener("mouseleave", function(){ modeBtn.style.transform = ""; modeBtn.style.filter = ""; });
-  renderModeBtn();
+  renderArsenal();
 
   /* ── DANGER MODE TOGGLE (sits just right of the cannon) ─────────────────── */
   var dangerBtn = document.createElement("button");
@@ -418,6 +482,8 @@
   function enterDanger() {
     dangerState = "active";
     dangerTimer = DANGER_DURATION;
+    tankTimer = Math.min(tankTimer, 3);       // the swarm brings vehicles right away
+    bomberTimer = Math.min(bomberTimer, 7);
     setVignette(dangerForced ? "forced" : "active");
     shakeScreen();
   }
@@ -457,7 +523,7 @@
   wrapper.appendChild(canvas);
   wrapper.appendChild(tank);
   wrapper.appendChild(closeBtn);
-  wrapper.appendChild(modeBtn);
+  wrapper.appendChild(arsenal);
   wrapper.appendChild(dangerBtn);
   wrapper.appendChild(dangerVignette);
   wrapper.appendChild(alertBanner);
@@ -489,41 +555,86 @@
     setText(hudStolen, "🪖 " + stolen);
   }
 
-  // The best score is written at most once every 1.5s (and on exit) instead of
-  // on every kill.
-  var bestDirty = false, bestTimer = 0;
-  function loadBest() {
+  /* ── SCORE, LIFETIME PROGRESS, UNLOCKS, COMBOS ───────────────────────────────
+     Best score and lifetime score are written at most once every 1.5s (and on
+     exit) instead of on every kill. Lifetime score unlocks the new weapons;
+     players from before it existed start from their best score. */
+  var statsDirty = false, statsTimer = 0;
+  function loadStats() {
     try {
-      chrome.storage.local.get(["cbBest"], function(r){
-        if (r && typeof r.cbBest === "number" && r.cbBest > best) { best = r.cbBest; renderHUD(); }
+      chrome.storage.local.get(["cbBest", "cbTotalKills"], function(r){
+        r = r || {};
+        var storedBest = typeof r.cbBest === "number" ? r.cbBest : 0;
+        var storedTotal = typeof r.cbTotalKills === "number" ? r.cbTotalKills : 0;
+        if (storedBest > best) best = storedBest;
+        totalBase = Math.max(storedTotal, storedBest);
+        unlocksKnown = true;
+        markUnlocked();
+        renderArsenal();
+        renderHUD();
       });
-    } catch(e){}
+    } catch(e){ unlocksKnown = true; }
   }
-  function flushBest() {
-    if (bestTimer) { clearTimeout(bestTimer); bestTimer = 0; }
-    if (!bestDirty) return;
-    bestDirty = false;
-    try { chrome.storage.local.set({ cbBest: best }); } catch(e){}
+  function flushStats() {
+    if (statsTimer) { clearTimeout(statsTimer); statsTimer = 0; }
+    if (!statsDirty) return;
+    statsDirty = false;
+    try { chrome.storage.local.set({ cbBest: best, cbTotalKills: totalScore() }); } catch(e){}
   }
-  function saveBestSoon() {
-    bestDirty = true;
-    if (!bestTimer) bestTimer = setTimeout(flushBest, 1500);
+  function saveStatsSoon() {
+    statsDirty = true;
+    if (!statsTimer) statsTimer = setTimeout(flushStats, 1500);
   }
   function addScore(n) {
     score += n;
-    if (score > best) { best = score; saveBestSoon(); }
+    if (score > best) best = score;
+    saveStatsSoon();
     renderHUD();
+    announceUnlocks();
   }
 
-  /* ── FIRST-LAUNCH INTRO (shown only once, ever) ──────────────────────────── */
+  // Weapons already unlocked when the game starts are not announced again.
+  var announced = {};
+  function markUnlocked() {
+    WEAPONS.forEach(function (w) { if (isUnlocked(w)) announced[w.id] = true; });
+  }
+  function announceUnlocks() {
+    if (!unlocksKnown) return;
+    for (var i = 0; i < WEAPONS.length; i++) {
+      var w = WEAPONS[i];
+      if (announced[w.id] || !isUnlocked(w)) continue;
+      announced[w.id] = true;
+      renderArsenal();
+      spawnFloater(viewW / 2, viewH * 0.32, w.icon + " " + w.name + " UNLOCKED! · press " + (i + 1), "#ffd24a", 24, 2.6);
+      chips[i].classList.remove("__cb_new");
+      void chips[i].offsetWidth;   // restart the pop animation
+      chips[i].classList.add("__cb_new");
+      shakeScreen(6);
+    }
+  }
+
+  // Kills close together build a combo with bonus points.
+  var COMBO_NAMES = ["", "", "DOUBLE KILL!", "TRIPLE KILL!", "MULTI KILL!", "RAMPAGE!", "UNSTOPPABLE!"];
+  function registerKill(x, y) {
+    comboCount = comboT > 0 ? comboCount + 1 : 1;
+    comboT = COMBO_WINDOW;
+    if (comboCount < 2) return;
+    var name = COMBO_NAMES[Math.min(comboCount, COMBO_NAMES.length - 1)];
+    var bonus = Math.min(comboCount - 1, 5);
+    spawnFloater(Math.max(90, Math.min(viewW - 90, x)), Math.max(70, y - 70), name + " +" + bonus, "#ff9a20", 20 + Math.min(comboCount, 6) * 2, 1.5);
+    addScore(bonus);
+  }
+
+  /* ── FIRST-LAUNCH INTRO (shown once; again once when it gains new content) ── */
+  var INTRO_VERSION = 2;   // 2 = arsenal + enemy vehicles
   function maybeShowIntro() {
     try {
       chrome.storage.local.get(["cbIntroSeen"], function(r){
-        if (gameActive && (!r || !r.cbIntroSeen)) showIntro();
+        if (gameActive && (!r || !(r.cbIntroSeen >= INTRO_VERSION))) showIntro(!!(r && r.cbIntroSeen));
       });
-    } catch(e) { showIntro(); }
+    } catch(e) { showIntro(false); }
   }
-  function showIntro() {
+  function showIntro(returning) {
     introActive = true;
     var ov = document.createElement("div");
     ov.setAttribute("data-cb-ui", "1");
@@ -532,35 +643,41 @@
       "display:flex;align-items:center;justify-content:center;",
       "background:rgba(0,0,0,0.62);backdrop-filter:blur(3px);font-family:system-ui,sans-serif;"
     ].join("");
+    var row = function (icon, html) {
+      return '<div style="display:flex;align-items:center;gap:10px;margin:6px 0"><div style="font-size:20px;min-width:50px;white-space:nowrap;text-align:center">' + icon + '</div><div>' + html + '</div></div>';
+    };
     ov.innerHTML =
-      '<div style="position:fixed;bottom:120px;left:50%;transform:translateX(-50%);text-align:center;">'+
+      '<div style="position:fixed;bottom:170px;left:50%;transform:translateX(-50%);text-align:center;">'+
         '<div style="animation:cbWiggle 1s ease-in-out infinite">'+
-        '<div style="background:#ffd24a;color:#111;font-weight:800;font-size:12px;padding:5px 10px;border-radius:9px;margin-bottom:4px">Switch 🔫 Gun &amp; ⚠️ Danger beside the cannon</div>'+
+        '<div style="background:#ffd24a;color:#111;font-weight:800;font-size:12px;padding:5px 10px;border-radius:9px;margin-bottom:4px">Pick weapons (keys 1–6) &amp; ⚠️ Danger beside the cannon</div>'+
         '<div style="font-size:42px;line-height:1;color:#ffd24a;text-shadow:0 2px 8px rgba(0,0,0,.6)">↓</div>'+
       '</div></div>'+
-      '<div style="background:#15171a;color:#eee;max-width:380px;width:86%;border-radius:16px;'+
-      'padding:24px 26px;box-shadow:0 20px 60px rgba(0,0,0,0.6);border:1px solid rgba(255,210,74,0.3)">'+
-      '<div style="font-size:19px;font-weight:800;color:#ffd24a;margin-bottom:6px">🔥 Welcome to BlastBlastBlast</div>'+
-      '<div style="font-size:13px;opacity:.7;margin-bottom:16px">Move to aim · <b>click anywhere to fire</b> · Esc to remove</div>'+
-      '<div style="display:flex;gap:10px;margin:10px 0"><div style="font-size:22px">💣</div><div><b>Cannon</b> — arcing blasts. Click anywhere to lob a ball.</div></div>'+
-      '<div style="display:flex;gap:10px;margin:10px 0"><div style="font-size:22px">🔫</div><div><b>Gun</b> — switch beside the cannon; <b>hold</b> to rapid-fire bullets.</div></div>'+
-      '<div style="display:flex;gap:10px;margin:10px 0"><div style="font-size:22px">⚠️</div><div><b>Danger</b> — toggle a swarm of soldiers from all sides!</div></div>'+
-      '<button id="__cbIntroOk" style="margin-top:16px;width:100%;background:#ffd24a;color:#111;border:0;'+
+      '<div style="background:#15171a;color:#eee;max-width:430px;width:88%;border-radius:16px;font-size:13px;line-height:1.35;margin-bottom:150px;'+
+      'padding:18px 22px;box-shadow:0 20px 60px rgba(0,0,0,0.6);border:1px solid rgba(255,210,74,0.3)">'+
+      '<div style="font-size:19px;font-weight:800;color:#ffd24a;margin-bottom:6px">' +
+        (returning ? '🆕 New in BlastBlastBlast' : '🔥 Welcome to BlastBlastBlast') + '</div>'+
+      '<div style="font-size:13px;opacity:.7;margin-bottom:12px">Move to aim · <b>click anywhere to fire</b> · Esc to remove</div>'+
+      row('💣🔫', '<b>Cannon &amp; Gun</b> — the classics: click to lob a ball, <b>hold</b> to rapid-fire.') +
+      row('🚀🔥', '<b>Rockets &amp; Flamethrower</b> — unlock them by scoring points. Hold to keep firing.') +
+      row('⚡💥', '<b>Laser &amp; Cluster bombs</b> — carve lines through text, or split one bomb into six.') +
+      row('🛡️✈️', '<b>Enemy tanks &amp; bombers</b> attack the page. Several hits take them down!') +
+      row('⚠️', '<b>Danger</b> — toggle a swarm of soldiers and vehicles from all sides.') +
+      '<button id="__cbIntroOk" style="margin-top:10px;width:100%;background:#ffd24a;color:#111;border:0;'+
       'border-radius:10px;padding:11px;font-weight:800;font-size:14px;cursor:pointer">Let\u2019s blast! 🚀</button></div>';
     document.documentElement.appendChild(ov);
     removeList.push(ov);
     function highlightToggles(on){
-      [modeBtn, dangerBtn].forEach(function(b){
+      [arsenal, dangerBtn].forEach(function(b){
         b.style.opacity = "1";
         b.style.outline = on ? "3px solid #ffd24a" : "";
       });
     }
     highlightToggles(true);
     function dismiss(){ introActive = false; highlightToggles(false); if (ov.parentNode) ov.parentNode.removeChild(ov);
-      try { chrome.storage.local.set({ cbIntroSeen: true }); } catch(e){} }
+      try { chrome.storage.local.set({ cbIntroSeen: INTRO_VERSION }); } catch(e){} }
     ov.querySelector("#__cbIntroOk").addEventListener("click", function(e){ e.preventDefault(); e.stopPropagation(); dismiss(); });
     // Clicking the backdrop both dismisses the intro AND fires — no wasted first click
-    ov.addEventListener("click", function(e){ if (e.target === ov) { e.stopPropagation(); dismiss(); beginFire(e.clientX, e.clientY); } });
+    ov.addEventListener("click", function(e){ if (e.target === ov) { e.stopPropagation(); dismiss(); beginFire(e.clientX, e.clientY); endFire(); } });
   }
 
   /* ── PIVOT / MUZZLE HELPERS ─────────────────────────────────────────────── */
@@ -614,44 +731,68 @@
     barrelG.setAttribute("transform", "rotate(" + (aimAngle * 180 / Math.PI).toFixed(2) + " 70 38)");
   }
 
+  // Rockets, flame and laser point the barrel straight at the cursor.
+  function aimDirect(mx, my) {
+    var p = getPivot();
+    aimAngle = Math.atan2(my - p.y, mx - p.x);
+  }
+
   function applyAim() {
-    if (mode === "cannon") updateCannonAimTo(mouseX, mouseY);
-    else                   aimBarrelToward(mouseX, mouseY);
+    if (isLobbed(mode))   updateCannonAimTo(mouseX, mouseY);
+    else if (mode === "gun") aimBarrelToward(mouseX, mouseY);
+    else                  aimDirect(mouseX, mouseY);
   }
 
   function fireAt(x, y) {
     if (mode === "gun") {
       fireGun(x, y);
-    } else {
+    } else if (mode === "rocket") {
+      if (weaponCd <= 0) fireRocket(x, y);
+    } else if (mode === "cluster") {
+      if (weaponCd <= 0) { updateCannonAimTo(x, y); fireCannon("cluster"); }
+    } else if (mode === "cannon") {
       updateCannonAimTo(x, y);
-      fireCannon();
+      fireCannon("ball");
     }
+    // flame and laser fire continuously while held (updateWeapons)
   }
 
-  // Pointer pressed: fire once now; in gun mode begin holding so the bullets
-  // keep streaming (updateGunAutoFire) until the pointer is released.
+  // Pointer pressed: fire once now; gun, rockets, flame and laser keep firing
+  // (updateWeapons) until the pointer is released.
   function beginFire(x, y) {
     if (introActive) return;          // wait until the intro is dismissed
     mouseX = x; mouseY = y;
     fireAt(x, y);
-    if (mode === "gun") { gunHeld = true; gunFireCd = GUN_FIRE_INTERVAL; }
+    held = true;
+    if (mode === "gun") gunFireCd = GUN_FIRE_INTERVAL;
   }
-  function endFire() { gunHeld = false; }
-  function updateGunAutoFire(dt) {
-    if (mode !== "gun") { gunHeld = false; return; }
-    if (!gunHeld) return;
-    gunFireCd -= dt;
-    if (gunFireCd <= 0) { fireGun(mouseX, mouseY); gunFireCd = GUN_FIRE_INTERVAL; }
+  function endFire() { held = false; laserBeam = null; lastCarve = null; }
+
+  function updateWeapons(dt) {
+    if (weaponCd > 0) weaponCd -= dt;
+    if (introActive) { held = false; return; }
+    if (mode === "gun") {
+      if (!held) return;
+      gunFireCd -= dt;
+      if (gunFireCd <= 0) { fireGun(mouseX, mouseY); gunFireCd = GUN_FIRE_INTERVAL; }
+    } else if (mode === "rocket") {
+      if (held && weaponCd <= 0) fireRocket(mouseX, mouseY);
+    } else if (mode === "flame") {
+      if (held) fireFlame(dt);
+    } else if (mode === "laser") {
+      if (held) fireLaser(dt); else laserBeam = null;
+    }
   }
 
   /* ── FIRE ────────────────────────────────────────────────────────────────── */
-  function fireCannon() {
+  function fireCannon(kind) {
     if (!hasAim) return;
     var m   = getMuzzle();
     var sol = solveLaunch(m.x, m.y, targetX, targetY);
     if (sol.dist < MIN_AIM_DIST) return;
 
     balls.push({
+      kind: kind || "ball",
       x: m.x, y: m.y,
       vx: sol.vx, vy: sol.vy,
       trail: [], spin: 0,
@@ -663,6 +804,179 @@
     spawnMuzzleFlash(m.x, m.y);
     hasAim = false;
     aimPower = 0;
+    if (kind === "cluster") weaponCd = CLUSTER_COOLDOWN;
+  }
+
+  /* ── ROCKETS: fast, straight, big blast at the cursor ───────────────────── */
+  function fireRocket(tx, ty) {
+    aimDirect(tx, ty);
+    var m = getMuzzle();
+    var dx = tx - m.x, dy = ty - m.y, dist = Math.hypot(dx, dy);
+    if (dist < 40) return;
+    rockets.push({ x: m.x, y: m.y, tx: tx, ty: ty, ang: Math.atan2(dy, dx), speed: 420,
+                   dist: dist, traveled: 0, smokeT: 0 });
+    spawnMuzzleFlash(m.x, m.y);
+    shakeScreen(3);
+    weaponCd = ROCKET_COOLDOWN;
+  }
+  function rocketBlast(x, y) {
+    explodeAt(x, y, { r: 70, killR: 112, mark: 1.45, shake: 12, particles: 1.7, dmg: 5 });
+  }
+  function updateRockets(dt) {
+    for (var i = rockets.length - 1; i >= 0; i--) {
+      var r = rockets[i];
+      r.speed = Math.min(r.speed + 2200 * dt, 1600);
+      var step = r.speed * dt, ca = Math.cos(r.ang), sa = Math.sin(r.ang);
+      if (r.traveled + step >= r.dist) { rocketBlast(r.tx, r.ty); rockets.splice(i, 1); continue; }
+      r.traveled += step;
+      r.x += ca * step; r.y += sa * step;
+      // A rocket that meets an enemy vehicle on the way explodes on it.
+      var hitE = enemyNear(r.x, r.y, 4);
+      if (hitE) { rocketBlast(r.x, r.y); rockets.splice(i, 1); continue; }
+      r.smokeT -= dt;
+      if (r.smokeT <= 0) {
+        r.smokeT = 0.016;
+        particles.push({ x: r.x - ca * 12, y: r.y - sa * 12, vx: (Math.random() - 0.5) * 30, vy: (Math.random() - 0.5) * 30,
+          life: 0.55, maxLife: 0.55, size: 3 + Math.random() * 3, color: "#2a2a2a", type: "smoke", rotation: 0, rotSpeed: 0 });
+      }
+    }
+  }
+  function renderRockets() {
+    for (var i = 0; i < rockets.length; i++) {
+      var r = rockets[i], c = Math.cos(r.ang) * dpr, s = Math.sin(r.ang) * dpr;
+      ctx.setTransform(c * 1.45, s * 1.45, -s * 1.45, c * 1.45, r.x * dpr, r.y * dpr);
+      ctx.globalAlpha = 0.9;
+      ctx.drawImage(glowSprite("#ff9a20"), -30, -9, 20, 18);      // exhaust
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "#d8dde2";
+      ctx.fillRect(-12, -2.6, 16, 5.2);                            // body
+      ctx.fillStyle = "#c62d1f";
+      ctx.beginPath(); ctx.moveTo(4, -2.6); ctx.lineTo(10, 0); ctx.lineTo(4, 2.6); ctx.closePath(); ctx.fill();  // nose
+      ctx.fillStyle = "#59636b";
+      ctx.beginPath(); ctx.moveTo(-12, -2.6); ctx.lineTo(-15, -6); ctx.lineTo(-8, -2.6); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(-12, 2.6); ctx.lineTo(-15, 6); ctx.lineTo(-8, 2.6); ctx.closePath(); ctx.fill();
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  /* ── FLAMETHROWER: hold to spray fire; burns text and soldiers at the tip ── */
+  function fireFlame(dt) {
+    var m = getMuzzle();
+    var dx = mouseX - m.x, dy = mouseY - m.y, d = Math.hypot(dx, dy) || 1;
+    var range = Math.min(d, FLAME_RANGE), ux = dx / d, uy = dy / d;
+    var tipX = m.x + ux * range, tipY = m.y + uy * range;
+    var base = Math.atan2(uy, ux);
+    for (var k = 0; k < 4 && flames.length < 260; k++) {
+      var a = base + (Math.random() - 0.5) * 0.3, sp = 470 + Math.random() * 160;
+      var life = range / sp * (0.85 + Math.random() * 0.3);
+      flames.push({ x: m.x + ux * 6, y: m.y + uy * 6, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                    life: life, maxLife: life, size: 5 + Math.random() * 4 });
+    }
+    flameBurnT -= dt;
+    if (flameBurnT <= 0) {
+      flameBurnT = 0.11;
+      explodeAt(tipX + (Math.random() - 0.5) * 14, tipY + (Math.random() - 0.5) * 14,
+        { r: 24, killR: 36, mark: Math.random() < 0.2 ? 0.5 : 0, shake: 0, particles: 0, burn: true, dmg: 0 });
+    }
+    for (var i = soldiers.length - 1; i >= 0; i--) {
+      var s = soldiers[i];
+      if (s.state !== "dead" && segDist(s.x, s.y - 20, m.x, m.y, tipX, tipY) < 16) killSoldier(s);
+    }
+    hurtEnemiesOnSegment(m.x, m.y, tipX, tipY, 10, 3.5 * dt);
+  }
+  function updateFlames(dt) {
+    var j = 0;
+    for (var i = 0; i < flames.length; i++) {
+      var f = flames[i];
+      f.x += f.vx * dt; f.y += f.vy * dt;
+      f.vx *= 0.985; f.vy = f.vy * 0.985 - 30 * dt;
+      f.life -= dt;
+      if (f.life > 0) flames[j++] = f;
+    }
+    flames.length = j;
+  }
+  var FLAME_COLORS = ["#4a2a1c", "#c4260c", "#e8480f", "#ff7a14", "#ffa628", "#ffd75a", "#fff1a8"];
+  function renderFlames() {
+    if (!flames.length) return;
+    for (var i = 0; i < flames.length; i++) {
+      var f = flames[i], t = f.life / f.maxLife;          // 1 at the nozzle → 0 at the tip
+      var r = f.size * (2 - t);
+      ctx.globalAlpha = t < 0.15 ? t / 0.15 * 0.5 : 0.95;
+      ctx.drawImage(glowSprite(FLAME_COLORS[Math.min(FLAME_COLORS.length - 1, Math.floor(t * FLAME_COLORS.length))]),
+                    f.x - r, f.y - r, r * 2, r * 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ── LASER: hold to burn a beam to the cursor; sweeping carves the text ─── */
+  function fireLaser(dt) {
+    var m = getMuzzle();
+    laserBeam = { x0: m.x, y0: m.y, x1: mouseX, y1: mouseY };
+    laserCarveT -= dt;
+    var moved = lastCarve ? Math.hypot(mouseX - lastCarve.x, mouseY - lastCarve.y) : 1e9;
+    if (moved >= 10 || laserCarveT <= 0) {
+      laserCarveT = 0.08;
+      lastCarve = { x: mouseX, y: mouseY };
+      explodeAt(mouseX, mouseY, { r: 14, killR: 20, mark: 0, shake: 0, particles: 0, burn: true, dmg: 0 });
+    }
+    for (var i = soldiers.length - 1; i >= 0; i--) {
+      var s = soldiers[i];
+      if (s.state !== "dead" && segDist(s.x, s.y - 20, m.x, m.y, mouseX, mouseY) < 11) killSoldier(s);
+    }
+    hurtEnemiesOnSegment(m.x, m.y, mouseX, mouseY, 6, 6 * dt);
+    if (Math.random() < 0.7) {
+      var a = Math.random() * Math.PI * 2, sp = 60 + Math.random() * 120;
+      particles.push({ x: mouseX, y: mouseY, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 0.2, maxLife: 0.2,
+        size: 0.8 + Math.random(), color: Math.random() < 0.5 ? "#ffffff" : "#8fe8ff", type: "spark", rotation: 0, rotSpeed: 0 });
+    }
+  }
+  function renderLaser() {
+    var b = laserBeam;
+    if (!b) return;
+    var flick = 0.85 + Math.random() * 0.3;
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(0,150,255,0.25)"; ctx.lineWidth = 13 * flick;
+    ctx.beginPath(); ctx.moveTo(b.x0, b.y0); ctx.lineTo(b.x1, b.y1); ctx.stroke();
+    ctx.strokeStyle = "rgba(30,170,255,0.9)"; ctx.lineWidth = 5 * flick;
+    ctx.beginPath(); ctx.moveTo(b.x0, b.y0); ctx.lineTo(b.x1, b.y1); ctx.stroke();
+    ctx.strokeStyle = "#f2fdff"; ctx.lineWidth = 1.8;
+    ctx.beginPath(); ctx.moveTo(b.x0, b.y0); ctx.lineTo(b.x1, b.y1); ctx.stroke();
+    ctx.globalAlpha = 0.9;
+    ctx.drawImage(glowSprite("#8fe8ff"), b.x1 - 16, b.y1 - 16, 32, 32);
+    ctx.restore();
+  }
+
+  /* ── CLUSTER BOMB: lobbed like the cannon, bursts into six bomblets ──────── */
+  function burstCluster(x, y) {
+    explodeAt(x, y, { r: 30, killR: 50, mark: 0.55, shake: 5, particles: 0.6, dmg: 2 });
+    for (var i = 0; i < 6; i++) {
+      var a = (i / 6) * Math.PI * 2 + (Math.random() - 0.5) * 0.5, sp = 120 + Math.random() * 120;
+      bomblets.push({ x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp * 0.6 - 170 - Math.random() * 80,
+                      fuse: 0.42 + Math.random() * 0.3, blink: Math.random() * 6 });
+    }
+  }
+  function updateBomblets(dt) {
+    for (var i = bomblets.length - 1; i >= 0; i--) {
+      var b = bomblets[i];
+      b.vy += BALL_G * 0.8 * dt;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      b.fuse -= dt; b.blink += dt * 18;
+      if (b.fuse <= 0) {
+        bomblets.splice(i, 1);
+        explodeAt(Math.max(4, Math.min(viewW - 4, b.x)), Math.max(4, Math.min(viewH - 4, b.y)),
+          { r: 34, killR: 62, mark: 0.65, shake: 4, particles: 0.7, dmg: 2 });
+      }
+    }
+  }
+  function renderBomblets() {
+    for (var i = 0; i < bomblets.length; i++) {
+      var b = bomblets[i];
+      ctx.fillStyle = "#2b2b2b";
+      ctx.beginPath(); ctx.arc(b.x, b.y, 4.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = Math.sin(b.blink) > 0 ? "#ff3b2f" : "#5a1410";
+      ctx.beginPath(); ctx.arc(b.x, b.y - 1, 1.6, 0, Math.PI * 2); ctx.fill();
+    }
   }
 
   function spawnMuzzleFlash(x, y) {
@@ -709,6 +1023,19 @@
           killSoldier(s);
           hit = true;
           break;
+        }
+      }
+      if (!hit) {
+        var e = enemyOnSegment(b.px, b.py, b.x, b.y, 2);
+        if (e) {
+          hitEnemy(e, 0.5);
+          for (var q = 0; q < 4; q++) {
+            var qa = Math.random()*Math.PI*2, qs = 60+Math.random()*90;
+            particles.push({ x:b.x, y:b.y, vx:Math.cos(qa)*qs, vy:Math.sin(qa)*qs, life:0.16, maxLife:0.16,
+              size:0.8+Math.random(), color:"#fff3c4", type:"spark", rotation:0, rotSpeed:0 });
+          }
+          bullets.splice(i, 1);
+          continue;
         }
       }
       if (hit) {
@@ -806,12 +1133,15 @@
     ctx.restore();
   }
 
-  // Crosshair reticle drawn at the cursor while in gun mode.
+  // Reticle drawn at the cursor for the straight-shooting weapons.
+  var RETICLE_COLORS = { gun: "rgba(255,80,60,0.9)", rocket: "rgba(255,170,40,0.95)",
+                         flame: "rgba(255,120,30,0.9)", laser: "rgba(110,220,255,0.95)" };
   function renderGunReticle() {
-    if (mode !== "gun") return;
-    var x = mouseX, y = mouseY, r = 11;
+    var color = RETICLE_COLORS[mode];
+    if (!color || introActive) return;
+    var x = mouseX, y = mouseY, r = mode === "rocket" ? 14 : 11;
     ctx.save();
-    ctx.strokeStyle = "rgba(255,80,60,0.9)";
+    ctx.strokeStyle = color;
     ctx.lineWidth = 1.6;
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.stroke();
     ctx.beginPath();
@@ -820,8 +1150,12 @@
     ctx.moveTo(x, y-r-5); ctx.lineTo(x, y-3);
     ctx.moveTo(x, y+3);   ctx.lineTo(x, y+r+5);
     ctx.stroke();
-    ctx.fillStyle = "rgba(255,80,60,0.9)";
+    ctx.fillStyle = color;
     ctx.beginPath(); ctx.arc(x, y, 1.4, 0, Math.PI*2); ctx.fill();
+    if (mode === "rocket" && weaponCd > 0) {          // reload indicator
+      ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x, y, r + 7, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - weaponCd / ROCKET_COOLDOWN)); ctx.stroke();
+    }
     ctx.restore();
   }
 
@@ -843,7 +1177,8 @@
       // Explode exactly when flight time elapses → lands precisely at cursor target
       if (b.elapsed >= b.T) {
         b.exploded = true;
-        explodeAt(b.landX, b.landY);
+        if (b.kind === "cluster") burstCluster(b.landX, b.landY);
+        else explodeAt(b.landX, b.landY);
         balls.splice(i, 1);
       }
     }
@@ -856,21 +1191,31 @@
      within a frame, so a blast costs at most one layout, not one per node. */
   var blastQueue = [];
   var blastResults = [];
-  function explodeAt(cx, cy) {
-    spawnExplosionParticles(cx, cy);
-    createBlastMark(cx, cy);
-    shakeScreen();
+  // o (all optional): r page radius, killR soldier radius, mark scale (0 = none),
+  // shake amount (0 = none), particles scale (0 = none), dmg to enemy vehicles,
+  // burn (text turns to embers), enemy (fired by an enemy: no points).
+  function explodeAt(cx, cy, o) {
+    o = o || {};
+    var r = o.r || BLAST_RADIUS;
+    var killR = o.killR || SOLDIER_KILL_R;
+    var ps = o.particles === undefined ? 1 : o.particles;
+    if (ps) spawnExplosionParticles(cx, cy, ps);
+    if (o.mark !== 0) createBlastMark(cx, cy, o.mark || 1);
+    if (o.shake !== 0) shakeScreen(o.shake);
     // Kill any soldiers caught in the blast (drops their loot as a falling shard)
     for (var si = soldiers.length-1; si >= 0; si--) {
       var sol = soldiers[si];
-      if (Math.hypot(sol.x - cx, (sol.y-18) - cy) < SOLDIER_KILL_R) killSoldier(sol);
+      if (Math.hypot(sol.x - cx, (sol.y-18) - cy) < killR) killSoldier(sol, !o.enemy);
     }
-    if (blastQueue.length < MAX_JOBS) blastQueue.push({ cx: cx, cy: cy });
+    if (!o.enemy) damageEnemiesAt(cx, cy, killR * 0.75, o.dmg === undefined ? 3 : o.dmg);
+    if (blastQueue.length < MAX_JOBS) blastQueue.push({ cx: cx, cy: cy, r: r, burn: !!o.burn });
   }
 
-  function spawnExplosionParticles(cx, cy) {
-    for (var i = 0; i < 18; i++) {
-      var a = Math.random()*Math.PI*2, spd = 40+Math.random()*140;
+  function spawnExplosionParticles(cx, cy, scale) {
+    scale = scale || 1;
+    var n = Math.round(18 * scale);
+    for (var i = 0; i < n; i++) {
+      var a = Math.random()*Math.PI*2, spd = (40+Math.random()*140) * Math.sqrt(scale);
       var r = Math.random();
       var type, color, size, life;
       if (r < 0.55)      { type="spark"; color=Math.random()<0.5?"#ffffff":"#ffee44"; size=0.8+Math.random()*1; life=0.14+Math.random()*0.22; }
@@ -880,9 +1225,9 @@
         life:life, maxLife:life, size:size, color:color, type:type,
         rotation:Math.random()*Math.PI*2, rotSpeed:(Math.random()-0.5)*10 });
     }
-    shockwaves.push({x:cx,y:cy,r:0,maxR:42, life:0.22,maxLife:0.22,w:2.5,color:"255,185,90"});
-    shockwaves.push({x:cx,y:cy,r:0,maxR:26, life:0.13,maxLife:0.13,w:1.5,color:"255,255,255"});
-    craters.push({ x:cx, y:cy, r:14+Math.random()*5, life:1.0, maxLife:1.0 });
+    shockwaves.push({x:cx,y:cy,r:0,maxR:42*scale, life:0.22,maxLife:0.22,w:2.5,color:"255,185,90"});
+    shockwaves.push({x:cx,y:cy,r:0,maxR:26*scale, life:0.13,maxLife:0.13,w:1.5,color:"255,255,255"});
+    craters.push({ x:cx, y:cy, r:(14+Math.random()*5)*Math.min(scale, 1.6), life:1.0, maxLife:1.0 });
   }
 
   function distToRect(cx, cy, r) {
@@ -892,30 +1237,35 @@
   }
 
   // Hit-test sample points: centre, ring at R/2, ring at R (unit circle).
-  var SAMPLES = [[0, 0]];
+  // Small blasts (flame, laser) only need the centre and the outer ring.
+  var SAMPLES = [[0, 0]], SAMPLES_SMALL = [[0, 0]];
   (function () {
     var rings = [0.5, 1];
     for (var rd = 0; rd < rings.length; rd++)
-      for (var a = 0; a < 8; a++)
-        SAMPLES.push([Math.cos(a / 8 * Math.PI * 2) * rings[rd], Math.sin(a / 8 * Math.PI * 2) * rings[rd]]);
+      for (var a = 0; a < 8; a++) {
+        var p = [Math.cos(a / 8 * Math.PI * 2) * rings[rd], Math.sin(a / 8 * Math.PI * 2) * rings[rd]];
+        SAMPLES.push(p);
+        if (rings[rd] === 1) SAMPLES_SMALL.push(p);
+      }
   }());
 
   /* READ phase of one blast: gathers everything it will destroy. */
   function readBlast(job) {
-    var cx = job.cx, cy = job.cy, R = BLAST_RADIUS;
-    var res = { cx: cx, cy: cy, atoms: [], media: [], chars: [] };
+    var cx = job.cx, cy = job.cy, R = job.r || BLAST_RADIUS;
+    var res = { cx: cx, cy: cy, r: R, burn: job.burn, atoms: [], media: [], chars: [] };
     var seen = new Set(), atomSeen = new Set(), mediaSeen = new Set();
+    var samples = R < 30 ? SAMPLES_SMALL : SAMPLES;
 
     // 1) Whole UI atoms (buttons, icons, svg, bg-images) and videos/canvases.
-    for (var s = 0; s < SAMPLES.length; s++) {
-      var sx = cx + SAMPLES[s][0] * R, sy = cy + SAMPLES[s][1] * R;
+    for (var s = 0; s < samples.length; s++) {
+      var sx = cx + samples[s][0] * R, sy = cy + samples[s][1] * R;
       if (sx < 0 || sy < 0 || sx >= viewW || sy >= viewH) continue;
       var stack = document.elementsFromPoint(sx, sy) || [];
       for (var k = 0; k < stack.length && k < 4; k++) {
         var el = stack[k];
         if (!el || seen.has(el)) continue;
         seen.add(el);
-        var atom = atomToFling(el, cx, cy);
+        var atom = atomToFling(el, cx, cy, R);
         if (!atom) continue;
         if (atom.media) {
           if (!mediaSeen.has(atom.el)) { mediaSeen.add(atom.el); res.media.push(atom); }
@@ -947,20 +1297,22 @@
     }
 
     // 3) Characters under the blast (text inside flung atoms goes with them).
-    res.chars = collectBlastChars(cx, cy, R, res.atoms);
+    // Bigger blasts may tear out more characters (scaled by area).
+    var cap = Math.round(Math.max(40, Math.min(360, MAX_BLAST_CHARS * (R * R) / (BLAST_RADIUS * BLAST_RADIUS))));
+    res.chars = collectBlastChars(cx, cy, R, res.atoms, cap);
     return res;
   }
 
   /* WRITE phase of one blast. */
   function applyBlast(res) {
     var a, m;
-    for (a = 0; a < res.atoms.length; a++) flingElement(res.atoms[a].el, res.cx, res.cy, res.atoms[a].rect);
-    for (m = 0; m < res.media.length; m++) shatterMedia(res.media[m], res.cx, res.cy);
-    if (res.chars.length) blastChars(res.chars, res.cx, res.cy);
+    for (a = 0; a < res.atoms.length; a++) flingElement(res.atoms[a].el, res.cx, res.cy, res.atoms[a].rect, res.r);
+    for (m = 0; m < res.media.length; m++) shatterMedia(res.media[m], res.cx, res.cy, res.r);
+    if (res.chars.length) blastChars(res.chars, res.cx, res.cy, res.r, res.burn);
   }
 
   var SKIP_ATOM = { html:1, body:1, head:1, script:1, style:1, main:1, section:1, article:1, nav:1, ul:1, ol:1 };
-  function atomToFling(el, cx, cy) {
+  function atomToFling(el, cx, cy, R) {
     if (!el || el.nodeType !== 1) return null;
     // Climb out of SVG internals to the <svg> root
     if (el.ownerSVGElement) el = el.ownerSVGElement;
@@ -971,7 +1323,7 @@
     var rect = el.getBoundingClientRect();
     if (rect.width < 5 || rect.height < 5) return null;
     if (rect.width > 240 || rect.height > 180) return null;        // skip big containers
-    if (distToRect(cx, cy, rect) > BLAST_RADIUS) return null;      // not actually in blast
+    if (distToRect(cx, cy, rect) > R) return null;                 // not actually in blast
     if (tag === "img") return null;                                // handled by the image pass
     if (tag === "video" || tag === "canvas") {
       return { media: true, el: el, rect: rect, cs: getComputedStyle(el) };
@@ -1023,7 +1375,7 @@
   }
 
   /* ── ELEMENT SCATTERING — fling whole UI atoms ───────────────────────────── */
-  function flingElement(el, cx, cy, rect) {
+  function flingElement(el, cx, cy, rect, R) {
     if (scattered.has(el) || hiddenSet.has(el)) return;
     scattered.add(el);
     if (flung.length >= MAX_FLUNG) { hideEl(el); return; }   // too much already in the air
@@ -1032,7 +1384,7 @@
     var ecx = rect.left + rect.width/2, ecy = rect.top + rect.height/2;
     var ang = Math.atan2(ecy - cy, ecx - cx);
     var dist = Math.hypot(ecx - cx, ecy - cy);
-    var force = (1 - Math.min(dist / BLAST_RADIUS, 1)) * 480 + 150 + Math.random()*120;
+    var force = (1 - Math.min(dist / R, 1)) * 480 + 150 + Math.random()*120;
     flung.push({
       el: c.el, ranges: c.ranges, x: ecx, y: ecy, ox: ecx, oy: ecy,
       vx: Math.cos(ang) * force + (Math.random()-0.5)*150,
@@ -1130,7 +1482,7 @@
     return { node: node, off: off };
   }
 
-  function collectBlastChars(cx, cy, R, atoms) {
+  function collectBlastChars(cx, cy, R, atoms, cap) {
     var wins = new Map();   // Text -> [lo, hi] offsets worth measuring
     function addWin(n, lo, hi) {
       var w = wins.get(n);
@@ -1154,7 +1506,7 @@
 
     var out = [], R2 = R * R, styleCache = new Map();
     wins.forEach(function (w, node) {
-      if (out.length >= MAX_BLAST_CHARS) return;
+      if (out.length >= cap) return;
       var parent = node.parentElement;
       if (!parent || SKIP_TEXT_PARENT[parent.localName] || parent.namespaceURI !== HTML_NS) return;
       if (parent.closest("[data-cb-hidden],[data-cb-ui],[data-cb-blasted]")) return;
@@ -1164,7 +1516,7 @@
       var lo = Math.max(0, w[0]), hi = Math.min(len, w[1]);
       if (hi <= lo) return;
       forEachCluster(data, lo, hi, function (i, n) {
-        if (out.length >= MAX_BLAST_CHARS) return;
+        if (out.length >= cap) return;
         if (isSpaceCode(data.charCodeAt(i))) return;
         if (st && st.bits[i]) return;
         measRange.setStart(node, i);
@@ -1280,7 +1632,7 @@
   }
 
   // WRITE phase for characters: hide them and launch canvas copies.
-  function blastChars(chars, cx, cy) {
+  function blastChars(chars, cx, cy, R, burn) {
     var touched = new Map();
     for (var i = 0; i < chars.length; i++) {
       var c = chars[i];
@@ -1291,7 +1643,7 @@
       var t = touched.get(c.node);
       if (!t) { t = { st: st, runs: [] }; touched.set(c.node, t); }
       t.runs.push([c.i, c.i + c.n]);
-      if (c.style.color && debris.length < MAX_DEBRIS) spawnCharDebris(c, cx, cy);
+      if (c.style.color && debris.length < MAX_DEBRIS) spawnCharDebris(c, cx, cy, R, burn);
     }
     touched.forEach(function (t, node) {
       if (hlSupported) highlightRuns(node, t.st);
@@ -1374,23 +1726,25 @@
     return total;
   }
 
-  function spawnCharDebris(c, cx, cy) {
+  // burn: flame/laser — the character glows like an ember and floats up.
+  function spawnCharDebris(c, cx, cy, R, burn) {
     var r = c.rect, px = r.left + r.width / 2, py = r.top + r.height / 2;
     var dist  = Math.hypot(px - cx, py - cy);
-    var force = (1 - Math.min(dist / BLAST_RADIUS, 1)) * 640 + Math.random() * 180;
+    var force = (1 - Math.min(dist / R, 1)) * 640 + Math.random() * 180;
     var ang   = Math.atan2(py - cy, px - cx);
     var data = c.node.data, ch = data.substr(c.i, c.n), tt = c.style.tt;
     if (tt === "uppercase") ch = ch.toUpperCase();
     else if (tt === "lowercase") ch = ch.toLowerCase();
     else if (tt === "capitalize" && (c.i === 0 || isSpaceCode(data.charCodeAt(c.i - 1)))) ch = ch.toUpperCase();
+    var color = burn ? (Math.random() < 0.5 ? "#ff7a1a" : "#ffb02e") : c.style.color;
     debris.push({
-      t: 0, ch: ch, font: c.style.font, color: c.style.color, g: glyphFor(ch, c.style.font, c.style.color),
+      t: 0, ch: ch, font: c.style.font, color: color, g: glyphFor(ch, c.style.font, color),
       base: fontAscent(c.style.font, r.height) - r.height / 2,
       x: px, y: py,
-      vx: Math.cos(ang) * force + (Math.random()-0.5) * 200,
-      vy: Math.sin(ang) * force - 260 - Math.random() * 250,
-      rot: 0, rs: (Math.random()-0.5) * 560 * Math.PI / 180,
-      life: 1.2 + Math.random() * 1.0, fade: 0.35
+      vx: burn ? (Math.random()-0.5) * 90 : Math.cos(ang) * force + (Math.random()-0.5) * 200,
+      vy: burn ? -60 - Math.random() * 110 : Math.sin(ang) * force - 260 - Math.random() * 250,
+      rot: 0, rs: (Math.random()-0.5) * (burn ? 180 : 560) * Math.PI / 180,
+      life: burn ? 0.5 + Math.random() * 0.4 : 1.2 + Math.random() * 1.0, fade: burn ? 0.45 : 0.35
     });
   }
 
@@ -1398,7 +1752,7 @@
      The element is drawn once into a snapshot canvas (exactly what is on
      screen: currentSrc, object-fit, no new network request), then 16 pieces of
      that snapshot fly on the overlay canvas. */
-  function shatterMedia(m, cx, cy) {
+  function shatterMedia(m, cx, cy, R) {
     var el = m.el, rect = m.rect;
     if (shattered.has(el)) return;
     shattered.add(el);
@@ -1411,7 +1765,7 @@
         if (debris.length >= MAX_DEBRIS) return;
         var pcx = rect.left + col * pw + pw / 2, pcy = rect.top + row * ph + ph / 2;
         var dist = Math.hypot(pcx - cx, pcy - cy);
-        var f = (1 - Math.min(dist / BLAST_RADIUS, 1)) * 560 + Math.random() * 140;
+        var f = (1 - Math.min(dist / R, 1)) * 560 + Math.random() * 140;
         var a = Math.atan2(pcy - cy, pcx - cx);
         debris.push({
           t: 1, src: snap.canvas, sx: col * pw * k, sy: row * ph * k, sw: pw * k, sh: ph * k, w: pw, h: ph,
@@ -1591,7 +1945,7 @@
   }
 
   function renderTrajectoryPreview() {
-    if (mode !== "cannon" || !hasAim) return;
+    if (!isLobbed(mode) || !hasAim || introActive) return;
     var m = getMuzzle();
     var sol = solveLaunch(m.x, m.y, targetX, targetY);
     if (sol.dist < MIN_AIM_DIST) return;
@@ -1659,6 +2013,16 @@
         var col2 = tt>0.75 ? "rgba(255,255,200,"+alpha+")" : tt>0.45 ? "rgba(255,165,25,"+alpha+")" : "rgba(255,70,0,"+(alpha*0.55)+")";
         ctx.beginPath(); ctx.fillStyle=col2; ctx.arc(tp.x,tp.y,rad,0,Math.PI*2); ctx.fill();
       }
+      if (b.kind === "cluster") {
+        ctx.fillStyle = "#2d2d2d";
+        ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R * 0.85, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#d8321f"; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R * 0.55, b.spin, b.spin + Math.PI); ctx.stroke();
+        ctx.globalAlpha = 0.9;
+        ctx.drawImage(glowSprite("#ffcc33"), b.x - 6, b.y - BALL_R - 6, 12, 12);   // fuse spark
+        ctx.globalAlpha = 1;
+        continue;
+      }
       // Glowing ball (pre-rendered)
       ctx.drawImage(sprites.ball, b.x - ext, b.y - ext, ext * 2, ext * 2);
       // Spin spot
@@ -1716,9 +2080,10 @@
   }
 
   /* ── FLOATING POPUPS (score, taunts) drawn on canvas — cheap & smooth ────── */
-  function spawnFloater(x, y, text, color, size) {
+  function spawnFloater(x, y, text, color, size, life) {
+    life = life || 1.1;
     floaters.push({ x:x, y:y, text:text, color:color||"#ffd24a",
-      size:size||15, life:1.1, maxLife:1.1 });
+      size:size||15, life:life, maxLife:life });
   }
   function renderFloaters() {
     for (var i=0; i<floaters.length; i++) {
@@ -1827,12 +2192,13 @@
     return markVariants[Math.floor(Math.random()*markVariants.length)];
   }
 
-  function createBlastMark(cx, cy) {
+  function createBlastMark(cx, cy, scale) {
     var v = pickMarkVariant();
+    scale = scale || 1;
     if (!marksLayer) return;
     // Clip the mark to the scrollable document area (viewport coordinates) so
     // it never grows the page, then place it relative to the marks layer.
-    var half = v.half;
+    var half = v.half * scale;
     var L = Math.max(docMinX, cx - half), T = Math.max(docMinY, cy - half);
     var Rr = Math.min(docMaxX, cx + half), B = Math.min(docMaxY, cy + half);
     var w = Math.floor(Rr - L), h = Math.floor(B - T);
@@ -1845,10 +2211,10 @@
                       "width:" + w + "px!important;height:" + h + "px!important;" +
                       "transform-origin:" + (cx - L).toFixed(1) + "px " + (cy - T).toFixed(1) + "px;";
     var x = c.getContext("2d");
-    var ang = Math.random()*Math.PI*2, k = dpr / v.dpr;
+    var ang = Math.random()*Math.PI*2, k = dpr / v.dpr * scale;
     var cs = Math.cos(ang)*k, sn = Math.sin(ang)*k;
     x.setTransform(cs, sn, -sn, cs, (cx - L)*dpr, (cy - T)*dpr);
-    x.drawImage(v.c, -half * v.dpr, -half * v.dpr);
+    x.drawImage(v.c, -v.half * v.dpr, -v.half * v.dpr);
     marksLayer.appendChild(c);
     marks.push({ el: c, born: clock, removeAt: 0 });
     var live = 0;
@@ -2105,7 +2471,8 @@
       (Math.sin(clock*9 + s.phase)*7).toFixed(1) + "deg)";
   }
 
-  function killSoldier(s) {
+  // credit: false when an enemy shell killed the soldier (no points for the player).
+  function killSoldier(s, credit) {
     if (s.state === "dead") return;
     for (var k = 0; k < 16; k++) {
       var a = Math.random()*Math.PI*2, spd = 50+Math.random()*150, rr = Math.random();
@@ -2136,8 +2503,10 @@
     s.dvy       = -160 - Math.random()*70;
     s.rot       = 0;
     s.rotSpeed  = (Math.random() < 0.5 ? -1 : 1) * (180 + Math.random()*120);
+    if (credit === false) return;
     spawnFloater(s.x, s.y - 44, "+1 💥", "#ffd24a", 16);
     addScore(1);
+    registerKill(s.x, s.y - 44);
   }
 
   function escapeSoldier(s) {
@@ -2225,6 +2594,248 @@
       }
       positionLoot(s);
     }
+  }
+
+  /* ── ENEMY VEHICLES ──────────────────────────────────────────────────────────
+     Tanks roll in, park and shell the page; bombers fly over dropping bombs.
+     Both take several hits (HP bar) and are worth extra points. They show up
+     now and then in normal play and often in Danger mode. */
+  function spawnTank() {
+    var fromLeft = Math.random() < 0.5;
+    var y = viewH * (0.14 + Math.random() * 0.34);
+    enemies.push({ kind: "tank", x: fromLeft ? -46 : viewW + 46, y: y, dir: fromLeft ? 1 : -1,
+      speed: 46 + Math.random() * 20, hp: 8, maxHp: 8, radius: 26, state: "drive",
+      stopX: viewW * (0.12 + Math.random() * 0.76), fireT: 1, shots: 0,
+      turret: fromLeft ? 0.5 : Math.PI - 0.5, aimX: 0, aimY: 0, hitT: 0, wheel: 0, recoil: 0 });
+    spawnFloater(fromLeft ? 110 : viewW - 110, y - 46, "⚠️ ENEMY TANK!", "#ff5544", 16, 1.6);
+  }
+  function spawnBomber() {
+    var fromLeft = Math.random() < 0.5;
+    var y = 48 + Math.random() * Math.min(110, viewH * 0.16);
+    enemies.push({ kind: "bomber", x: fromLeft ? -70 : viewW + 70, y: y, dir: fromLeft ? 1 : -1,
+      speed: 150 + Math.random() * 40, hp: 3, maxHp: 3, radius: 28, dropT: 0.5,
+      bombs: 5 + Math.floor(Math.random() * 3), hitT: 0, prop: 0 });
+    spawnFloater(fromLeft ? 130 : viewW - 130, y + 34, "✈️ BOMBER INCOMING!", "#ff5544", 16, 1.6);
+  }
+  function countEnemies(kind) {
+    var n = 0;
+    for (var i = 0; i < enemies.length; i++) if (enemies[i].kind === kind) n++;
+    return n;
+  }
+  function enemyCY(e) { return e.kind === "tank" ? e.y - 6 : e.y; }
+
+  function updateEnemies(dt) {
+    var danger = isDangerActive();
+    if (!introActive) {
+      tankTimer -= dt;
+      if (tankTimer <= 0) {
+        tankTimer = danger ? 8 + Math.random() * 6 : 45 + Math.random() * 25;
+        if (countEnemies("tank") < (danger ? 3 : 1)) spawnTank();
+      }
+      bomberTimer -= dt;
+      if (bomberTimer <= 0) {
+        bomberTimer = danger ? 12 + Math.random() * 8 : 70 + Math.random() * 30;
+        if (countEnemies("bomber") < 1) spawnBomber();
+      }
+    }
+    for (var i = enemies.length - 1; i >= 0; i--) {
+      var e = enemies[i];
+      if (e.hitT > 0) e.hitT -= dt;
+      if (e.kind === "tank") updateTank(e, dt);
+      else if (updateBomber(e, dt)) enemies.splice(i, 1);   // flew off-screen
+    }
+    updateEnemyShots(dt);
+  }
+
+  function updateTank(e, dt) {
+    if (e.recoil > 0) e.recoil = Math.max(0, e.recoil - dt * 6);
+    if (e.state === "drive") {
+      var dx = e.stopX - e.x;
+      if (Math.abs(dx) < 2) {
+        e.state = "fire"; e.fireT = 0.8 + Math.random() * 0.6; pickTankTarget(e);
+      } else {
+        var step = (dx > 0 ? 1 : -1) * Math.min(Math.abs(dx), e.speed * dt);
+        e.x += step; e.dir = step > 0 ? 1 : -1; e.wheel += step;
+      }
+      return;
+    }
+    // Swing the turret toward the target, then fire.
+    var want = Math.atan2(e.aimY - (e.y - 12), e.aimX - e.x);
+    var diff = Math.atan2(Math.sin(want - e.turret), Math.cos(want - e.turret));
+    e.turret += Math.max(-2.5 * dt, Math.min(2.5 * dt, diff));
+    e.fireT -= dt;
+    if (e.fireT <= 0 && Math.abs(diff) < 0.1) {
+      fireTankShell(e);
+      e.shots++;
+      e.fireT = 2.3 + Math.random() * 1.4;
+      pickTankTarget(e);
+      if (e.shots % 3 === 0) { e.state = "drive"; e.stopX = viewW * (0.12 + Math.random() * 0.76); }
+    }
+  }
+  function pickTankTarget(e) {
+    e.aimX = Math.max(30, Math.min(viewW - 30, e.x + (Math.random() - 0.5) * 520));
+    e.aimY = Math.max(e.y + 50, Math.min(viewH * PLAY_TOP_FRAC, e.y + 70 + Math.random() * 260));
+  }
+  function fireTankShell(e) {
+    var mx = e.x + Math.cos(e.turret) * 26, my = e.y - 12 + Math.sin(e.turret) * 26;
+    var sol = solveLaunch(mx, my, e.aimX, e.aimY);
+    enemyShots.push({ kind: "shell", x: mx, y: my, vx: sol.vx, vy: sol.vy, T: sol.T, t: 0, tx: e.aimX, ty: e.aimY });
+    e.recoil = 1;
+    mFlashes.push({ x: mx, y: my, life: 0.16, maxLife: 0.16,
+      sparks: [{ a: e.turret, len: 18 }, { a: e.turret - 0.45, len: 11 }, { a: e.turret + 0.45, len: 11 }] });
+  }
+  function updateBomber(e, dt) {
+    e.x += e.dir * e.speed * dt;
+    e.prop += dt * 40;
+    e.dropT -= dt;
+    if (e.dropT <= 0 && e.bombs > 0 && e.x > 40 && e.x < viewW - 40) {
+      e.dropT = 0.42 + Math.random() * 0.25;
+      e.bombs--;
+      enemyShots.push({ kind: "bomb", x: e.x, y: e.y + 8, vx: e.dir * e.speed * 0.55, vy: 30,
+                        ty: Math.min(viewH * PLAY_TOP_FRAC, e.y + 120 + Math.random() * viewH * 0.4) });
+    }
+    return (e.dir > 0 && e.x > viewW + 90) || (e.dir < 0 && e.x < -90);
+  }
+  function updateEnemyShots(dt) {
+    for (var i = enemyShots.length - 1; i >= 0; i--) {
+      var s = enemyShots[i];
+      if (s.kind === "shell") {
+        s.vy += BALL_G * dt; s.x += s.vx * dt; s.y += s.vy * dt; s.t += dt;
+        if (s.t >= s.T) {
+          enemyShots.splice(i, 1);
+          explodeAt(s.tx, s.ty, { r: 40, killR: 60, mark: 0.9, shake: 5, particles: 0.9, enemy: true });
+        }
+      } else {
+        s.vy += 520 * dt; s.vx *= 0.99; s.x += s.vx * dt; s.y += s.vy * dt;
+        if (s.y >= s.ty) {
+          enemyShots.splice(i, 1);
+          explodeAt(Math.max(6, Math.min(viewW - 6, s.x)), s.ty, { r: 36, killR: 56, mark: 0.8, shake: 4, particles: 0.8, enemy: true });
+        }
+      }
+    }
+  }
+
+  function enemyNear(x, y, pad) {
+    for (var i = 0; i < enemies.length; i++) {
+      var e = enemies[i];
+      if (Math.hypot(e.x - x, enemyCY(e) - y) < e.radius + pad) return e;
+    }
+    return null;
+  }
+  function enemyOnSegment(ax, ay, bx, by, pad) {
+    for (var i = 0; i < enemies.length; i++) {
+      var e = enemies[i];
+      if (segDist(e.x, enemyCY(e), ax, ay, bx, by) < e.radius + pad) return e;
+    }
+    return null;
+  }
+  function hurtEnemiesOnSegment(ax, ay, bx, by, pad, dmg) {
+    for (var i = enemies.length - 1; i >= 0; i--) {
+      var e = enemies[i];
+      if (segDist(e.x, enemyCY(e), ax, ay, bx, by) < e.radius + pad) hitEnemy(e, dmg);
+    }
+  }
+  function damageEnemiesAt(x, y, R, dmg) {
+    if (!dmg) return;
+    for (var i = enemies.length - 1; i >= 0; i--) {
+      var e = enemies[i], d = Math.hypot(e.x - x, enemyCY(e) - y);
+      if (d < R + e.radius) hitEnemy(e, d < e.radius ? dmg : dmg * 0.6);
+    }
+  }
+  function hitEnemy(e, dmg) {
+    if (e.hp <= 0) return;
+    e.hp -= dmg;
+    e.hitT = 0.1;
+    if (e.hp <= 0) destroyEnemy(e);
+  }
+  function destroyEnemy(e) {
+    var idx = enemies.indexOf(e);
+    if (idx >= 0) enemies.splice(idx, 1);
+    var tank = e.kind === "tank", pts = tank ? 5 : 3, cy = enemyCY(e);
+    for (var k = 0; k < 3; k++) spawnExplosionParticles(e.x + (Math.random() - 0.5) * 44, cy + (Math.random() - 0.5) * 24, 1.2);
+    explodeAt(e.x, cy, { r: 52, killR: 80, mark: tank ? 1.2 : 0.8, shake: 14, particles: 1.4, dmg: 4 });
+    spawnFloater(e.x, cy - 44, "+" + pts + (tank ? " 🔥 TANK DOWN!" : " ✈️ BOMBER DOWN!"), "#ffd24a", 18, 1.6);
+    addScore(pts);
+    registerKill(e.x, cy - 44);
+  }
+
+  function renderEnemies() {
+    for (var i = 0; i < enemies.length; i++) {
+      var e = enemies[i];
+      if (e.kind === "tank") drawEnemyTank(e); else drawBomber(e);
+      drawHpBar(e);
+    }
+    for (var j = 0; j < enemyShots.length; j++) {
+      var s = enemyShots[j];
+      ctx.globalAlpha = 0.85;
+      ctx.drawImage(glowSprite("#ff3b2f"), s.x - 10, s.y - 10, 20, 20);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = s.kind === "shell" ? "#3a0d08" : "#222222";
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.kind === "shell" ? 4.8 : 4.4, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  function drawEnemyTank(e) {
+    var flash = e.hitT > 0;
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.beginPath(); ctx.ellipse(0, 10, 31, 5, 0, 0, Math.PI * 2); ctx.fill();
+    // tracks + road wheels
+    ctx.fillStyle = "#1c1c1c"; roundRectPath(-29, -2, 58, 12, 6); ctx.fill();
+    ctx.fillStyle = "#3b3b3b";
+    for (var w = -21; w <= 21; w += 10.5) { ctx.beginPath(); ctx.arc(w, 4, 3.6, 0, Math.PI * 2); ctx.fill(); }
+    ctx.fillStyle = "#0c0c0c";
+    var off = ((e.wheel % 6) + 6) % 6;
+    for (var t = -28 + off; t < 27; t += 6) ctx.fillRect(t, 8.4, 3, 1.6);
+    // hull
+    ctx.fillStyle = flash ? "#ffffff" : "#7d2a1f";
+    ctx.beginPath(); ctx.moveTo(-27, -2); ctx.lineTo(-22, -12); ctx.lineTo(22, -12); ctx.lineTo(28, -2); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = "#3d120c"; ctx.lineWidth = 1.2; ctx.stroke();
+    // barrel (absolute angle), drawn under the turret dome
+    ctx.save();
+    ctx.translate(0, -12); ctx.rotate(e.turret);
+    ctx.fillStyle = "#2a2a2a"; ctx.fillRect(5 - e.recoil * 4, -2.2, 22, 4.4);
+    ctx.fillStyle = "#141414"; ctx.fillRect(24 - e.recoil * 4, -3, 4, 6);
+    ctx.restore();
+    ctx.fillStyle = flash ? "#ffffff" : "#9a3a2c";
+    ctx.beginPath(); ctx.arc(0, -12, 10, Math.PI, 0); ctx.fill();
+    ctx.strokeStyle = "#3d120c"; ctx.stroke();
+    // star emblem
+    ctx.fillStyle = "#ffd24a";
+    ctx.beginPath();
+    for (var p = 0; p < 10; p++) {
+      var ang = -Math.PI / 2 + p * Math.PI / 5, rad = p % 2 ? 1.6 : 3.8;
+      ctx.lineTo(e.dir * 12 + Math.cos(ang) * rad, -7 + Math.sin(ang) * rad);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  function drawBomber(e) {
+    var flash = e.hitT > 0, body = flash ? "#ffffff" : "#4a535c", dark = flash ? "#ffffff" : "#363d44";
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.scale(e.dir, 1);
+    ctx.fillStyle = dark;     // tail fin + stabiliser
+    ctx.beginPath(); ctx.moveTo(-24, -2); ctx.lineTo(-33, -15); ctx.lineTo(-27, -15); ctx.lineTo(-17, -3); ctx.closePath(); ctx.fill();
+    ctx.fillRect(-32, -1.5, 12, 3);
+    ctx.fillStyle = body;     // fuselage
+    ctx.beginPath(); ctx.ellipse(0, 0, 31, 7.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = dark;     // wing
+    ctx.beginPath(); ctx.moveTo(-6, 1); ctx.lineTo(10, 1); ctx.lineTo(4, 9); ctx.lineTo(-14, 9); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#9fd3ff";  // cockpit
+    ctx.beginPath(); ctx.ellipse(17, -3, 6, 3, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#c62d1f";  // roundel
+    ctx.beginPath(); ctx.arc(-8, -1, 3.2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(225,225,225,0.55)";   // spinning propeller
+    ctx.beginPath(); ctx.ellipse(32, 0, 1.6, 2 + 8 * Math.abs(Math.sin(e.prop)), 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  function drawHpBar(e) {
+    var w = 40, x = e.x - w / 2, y = e.kind === "tank" ? e.y - 38 : e.y - 26;
+    var f = Math.max(0, e.hp / e.maxHp);
+    ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(x - 1, y - 1, w + 2, 6);
+    ctx.fillStyle = f > 0.5 ? "#5fd35f" : f > 0.25 ? "#ffcc33" : "#ff4d3d";
+    ctx.fillRect(x, y, w * f, 4);
   }
 
   // Pulsing red box around any element a soldier is currently coming to steal.
@@ -2473,17 +3084,22 @@
     clock += dt;
     readPhase(dt);
     applyAim();                 // barrel/trajectory once per frame (decoupled from pointermove)
-    updateGunAutoFire(dt);      // hold-to-fire: stream bullets while pointer held in gun mode
+    updateWeapons(dt);          // hold-to-fire weapons (gun, rockets, flame, laser)
     writePhase();
     applyShake(dt);
     ctx.clearRect(0, 0, viewW, viewH);
+    if (comboT > 0) comboT -= dt;
     updateBalls(dt);
+    updateRockets(dt);
+    updateBomblets(dt);
     updateBullets(dt);
+    updateFlames(dt);
     updateBlood(dt);
     updateParticles(dt);
     updateDebris(dt);
     updateFlung(dt);
     updateSoldiers(dt);
+    updateEnemies(dt);
     updateMarks();
     renderCraters();
     renderDebris();
@@ -2491,8 +3107,13 @@
     renderTrajectoryPreview();
     renderLootTargets();
     renderSoldiers();
+    renderEnemies();
     renderBalls();
+    renderRockets();
+    renderBomblets();
     renderBullets();
+    renderFlames();
+    renderLaser();
     renderGunReticle();
     renderParticles();
     renderFloaters();
@@ -2508,7 +3129,7 @@
   removeList.push(marksLayer);
   resizeCanvas();
   renderHUD();
-  loadBest();
+  loadStats();
   maybeShowIntro();
   // Keys must reach the page, not an embedded frame that had focus.
   try {
@@ -2520,8 +3141,18 @@
   /* ── EVENTS ──────────────────────────────────────────────────────────────── */
   function onResize() { resizeCanvas(); }
   window.addEventListener("resize", onResize);
-  function onEscKey(e){ if (e.key === "Escape" || e.keyCode === 27) destroy(); }
-  window.addEventListener("keydown", onEscKey, true);
+  function onKey(e) {
+    if (e.key === "Escape" || e.keyCode === 27) { destroy(); return; }
+    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    var t = e.target;
+    if (t && (t.isContentEditable || /^(input|textarea|select)$/.test(t.localName || ""))) return;
+    var idx = "123456".indexOf(e.key);
+    if (e.key.length !== 1 || idx < 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    selectWeapon(WEAPONS[idx].id);
+  }
+  window.addEventListener("keydown", onKey, true);
 
   // Pointer move only records the cursor; the aim math runs once per frame.
   function onGlobalMove(e) { mouseX = e.clientX; mouseY = e.clientY; }
@@ -2546,18 +3177,18 @@
   window.addEventListener("mousedown",  onClickBlock, true);
   window.addEventListener("click",      onClickBlock, true);
   window.addEventListener("contextmenu", onClickBlock, true);
-  window.addEventListener("pagehide",   flushBest, true);
+  window.addEventListener("pagehide",   flushStats, true);
 
   /* ── TEARDOWN — restores the page completely ─────────────────────────────── */
   function destroy() {
     if (!gameActive) return;
     gameActive = false;
-    gunHeld = false;
+    held = false;
     if (animId) cancelAnimationFrame(animId);
-    flushBest();
+    flushStats();
     clearTimeout(vigOffTimer);
     window.removeEventListener("resize", onResize);
-    window.removeEventListener("keydown", onEscKey, true);
+    window.removeEventListener("keydown", onKey, true);
     window.removeEventListener("pointermove", onGlobalMove, true);
     window.removeEventListener("pointerdown", onFirePointerDown, true);
     window.removeEventListener("pointerup",   onFirePointerUp, true);
@@ -2566,7 +3197,7 @@
     window.removeEventListener("mousedown",  onClickBlock, true);
     window.removeEventListener("click",      onClickBlock, true);
     window.removeEventListener("contextmenu", onClickBlock, true);
-    window.removeEventListener("pagehide",   flushBest, true);
+    window.removeEventListener("pagehide",   flushStats, true);
     restoreCursor();
 
     // Blasted text: drop the highlight (or undo the fallback spans).
@@ -2585,6 +3216,8 @@
     for (var s = 0; s < soldiers.length; s++) if (soldiers[s].loot) removeNode(soldiers[s].loot.clone);
     for (var r = 0; r < removeList.length; r++) removeNode(removeList[r]);
     flung.length = soldiers.length = bullets.length = bloodDrops.length = debris.length = marks.length = 0;
+    rockets.length = bomblets.length = flames.length = enemies.length = enemyShots.length = 0;
+    laserBeam = null;
     hiddenList.length = removeList.length = fbCreated.length = 0;
     fbOriginal.clear();
     lootPool = []; lootScan = null;

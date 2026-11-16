@@ -9,7 +9,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { launchChrome, sleep } from "./cdp.mjs";
 import { startServer } from "./server.mjs";
-import { loadVariants, openPage, injectGame, removeHarnessCss, mouse, click, key, centerOf } from "./harness.mjs";
+import { loadVariants, openPage, injectGame, removeHarnessCss, mouse, click, key, centerOf, useWeapon } from "./harness.mjs";
 
 const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf("--" + name); return i >= 0 ? args[i + 1] : def; };
@@ -144,9 +144,8 @@ async function runChecks(browser, server, variant) {
 
   // Best score writes are debounced: swarm + gun until a few kills happen.
   const dangerBtn = await centerOf(page, "#__cb_danger_btn");
-  const modeBtn = await centerOf(page, "#__cb_mode_btn");
   await click(page, dangerBtn.x, dangerBtn.y);
-  await click(page, modeBtn.x, modeBtn.y);
+  await useWeapon(page, 2);
   await sleep(3500);
   const t0 = Date.now();
   await mouse(page, "mousePressed", 300, 200);
@@ -161,7 +160,7 @@ async function runChecks(browser, server, variant) {
   const writes = await page.eval("window.__cbWrites || 0", ctx);
   record("Best score saves are debounced", kills < 3 || writes < kills, `${kills} kill(s), ${writes} storage write(s)`);
   await click(page, dangerBtn.x, dangerBtn.y);
-  await click(page, modeBtn.x, modeBtn.y);
+  await useWeapon(page, 1);
 
   // Teardown restores the page completely.
   await key(page, "Escape", "Escape", 27);

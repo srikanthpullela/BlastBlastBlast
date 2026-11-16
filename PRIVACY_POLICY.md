@@ -5,7 +5,7 @@
 
 ## Overview
 
-BlastBlastBlast ("the Extension") is a Chrome browser extension that turns any webpage into a playful artillery game. When activated, it places a cannon and a gun at the bottom of the current page, lets you blast page content apart with physics-based explosions, and spawns soldiers that try to "steal" page elements for you to shoot. This privacy policy explains what data the Extension accesses, how it is used, and how it is protected.
+BlastBlastBlast ("the Extension") is a Chrome browser extension that turns any webpage into a playful artillery game. When activated, it places a cannon and an arsenal of weapons at the bottom of the current page, lets you blast page content apart with physics-based explosions, and spawns soldiers, enemy tanks and bombers for you to shoot. This privacy policy explains what data the Extension accesses, how it is used, and how it is protected.
 
 ## Data Collection
 
@@ -33,10 +33,11 @@ To provide its gameplay, the Extension interacts with the page you are viewing *
 
 ### Locally Stored Data
 
-The Extension stores two small, non-personal values in your browser's local storage (`chrome.storage.local`):
+The Extension stores three small, non-personal values in your browser's local storage (`chrome.storage.local`):
 
-- **High score (`cbBest`):** the best number of soldiers you have blasted, used to display your personal best in the in-game scoreboard.
-- **Intro shown (`cbIntroSeen`):** a true/false flag recording that the one-time welcome screen has been shown, so it isn't displayed again.
+- **High score (`cbBest`):** your best score in a single game, shown in the in-game scoreboard.
+- **Lifetime score (`cbTotalKills`):** your total score across all games, used to unlock new weapons.
+- **Intro shown (`cbIntroSeen`):** which version of the welcome screen you have already seen, so it is only shown again when it has something new to explain.
 
 These values:
 
@@ -61,7 +62,7 @@ The Extension requests the following Chrome permissions, each used solely for th
 | --- | --- |
 | `activeTab` | Access the currently active tab when you click the Extension icon, so the game can be injected into the page you are viewing |
 | `scripting` | Inject the game's script into the active page on demand; the script adds the game's styles and removes them again when you remove the cannon |
-| `storage` | Store your local high score and whether the welcome screen has been shown |
+| `storage` | Store your local high score, your lifetime score (for weapon unlocks) and which welcome screen you have seen |
 
 ### Host Permissions
 
@@ -72,7 +73,7 @@ The Extension requests **no host permissions**. It only runs on the active tab w
 - The Extension operates within Chrome's sandboxed extension environment
 - It is injected only on demand, when you click the Extension icon
 - No network communication of any kind is performed
-- No data is persisted beyond the two local values described above
+- No data is persisted beyond the three local values described above
 
 ## Children's Privacy
 

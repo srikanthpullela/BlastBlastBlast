@@ -44,7 +44,7 @@ export const PERF_RECORDER = `
 // chrome.* stand-ins for the isolated world (the real popup injects with these APIs available).
 function chromeShim(introSeen) {
   return `
-    var __cbStore = { cbIntroSeen: ${introSeen ? "true" : "false"} };
+    var __cbStore = { cbIntroSeen: ${introSeen ? 99 : 0}, cbTotalKills: 999 };
     globalThis.chrome = {
       runtime: { getManifest: function () { return { version: "test" }; } },
       storage: { local: {
@@ -113,6 +113,21 @@ export async function click(page, x, y) {
 export async function key(page, keyName, code, keyCode) {
   await page.send("Input.dispatchKeyEvent", { type: "keyDown", key: keyName, code, windowsVirtualKeyCode: keyCode });
   await page.send("Input.dispatchKeyEvent", { type: "keyUp", key: keyName, code, windowsVirtualKeyCode: keyCode });
+}
+
+// Picks weapon n (1 = cannon, 2 = gun, ...). v1.2.1 only has a cannon/gun toggle button.
+export async function useWeapon(page, n) {
+  const toggle = await page.eval(`(function(){ var b = document.getElementById("__cb_mode_btn"); return b ? b.textContent : null; })()`);
+  if (toggle !== null) {
+    const showsGun = /GUN MODE/.test(toggle);           // button offers the weapon you'd switch TO
+    if ((n === 2 && showsGun) || (n === 1 && !showsGun)) {
+      const c = await centerOf(page, "#__cb_mode_btn");
+      await click(page, c.x, c.y);
+    }
+    return n <= 2;
+  }
+  await key(page, String(n), "Digit" + n, 48 + n);
+  return true;
 }
 
 export async function centerOf(page, selector) {
